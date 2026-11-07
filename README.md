@@ -63,8 +63,30 @@ validation → capture) est transmis aux clients via les *server instructions*.
 - `/repl <expr Lua>` renvoie la valeur de l'expression : canal de lecture
   structuré (`hl.get_monitors()`, `hl.get_config(…)`, …).
 
+## Fenêtre de chat native (v2 — `hyprpanel-chat`)
+
+Client chatbot graphique en **Slint** (crate `crates/hyprpanel-chat`, GPL-3.0
+car Slint est lié sous licence communautaire) : une fenêtre sombre où l'on
+discute directement avec le panneau.
+
+- **Boucle d'agent intégrée** : protocole Anthropic Messages en **streaming**
+  (SSE), endpoint par défaut `https://api.z.ai/api/anthropic` (GLM-5.3),
+  configurable dans `~/.config/hyprpanel/chat.toml` (chmod 600 ; `init` reprend
+  la clé de la config Zcode si présente).
+- **Client MCP** du daemon (rmcp, jeton en query) : les 20 outils du panneau
+  sont exposés au LLM ; les appels et résultats s'affichent en bulles « outil ».
+- System prompt = règles de chat + instructions du serveur reçues au handshake.
+
+```bash
+hyprpanel-chat init   # crée la config (clé Z.ai reprise silencieusement)
+hyprpanel-chat        # ouvre la fenêtre
+# ex. raccourci dans hyprland.lua :
+#   hl.bind(mainMod.."+Y", hl.dsp.exec_cmd("hyprpanel-chat"))
+```
+
 ## Périmètre
 
 Outil hôte local (socket Hyprland + fichiers de config) : ni conteneur ni
-déploiement distant, hors contrat images INFRA.md. v1 = chatbot seul ; une
-fenêtre Slint est envisagée en v2 sur `hyprpanel-core`.
+déploiement distant, hors contrat images INFRA.md. v1 = serveur MCP pour
+Claude Code/ZCode ; v2 = fenêtre Slint cliente (`hyprpanel-chat`). Historique
+de conversation non persistant, un seul serveur MCP.

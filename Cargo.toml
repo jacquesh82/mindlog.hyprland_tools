@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hyprpanel-core", "crates/hyprpanel-server"]
+members = ["crates/hyprpanel-core", "crates/hyprpanel-server", "crates/hyprpanel-chat"]
 
 [workspace.package]
 version = "0.1.0"

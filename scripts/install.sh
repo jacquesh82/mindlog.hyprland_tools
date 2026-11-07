@@ -13,11 +13,13 @@ UNIT_DIR="$HOME/.config/systemd/user"
 echo "== build release"
 cargo build --release
 
-echo "== binaire -> $BIN_DIR/hyprpanel"
+echo "== binaires -> $BIN_DIR"
 install -Dm755 target/release/hyprpanel "$BIN_DIR/hyprpanel"
+install -Dm755 target/release/hyprpanel-chat "$BIN_DIR/hyprpanel-chat"
 
 echo "== configuration"
 "$BIN_DIR/hyprpanel" init
+"$BIN_DIR/hyprpanel-chat" init
 
 TOKEN="$("$BIN_DIR/hyprpanel" token)"
 PORT="$(grep -E '^port' "$HOME/.config/hyprpanel/config.toml" | head -1 | sed 's/[^0-9]//g')"
@@ -47,3 +49,6 @@ echo "Enregistrement ZCode (~/.zcode/cli/config.json, clé imbriquée mcp.server
 echo "  \"hyprpanel\": { \"url\": \"http://127.0.0.1:$PORT/mcp?key=$TOKEN\" }"
 echo
 echo "Jeton : $TOKEN"
+echo
+echo "Fenêtre de chat : lancez « hyprpanel-chat » (ex. dans hyprland.lua :"
+echo "  hl.bind(mainMod..\"+Y\", hl.dsp.exec_cmd(\"hyprpanel-chat\")) )"

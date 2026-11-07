@@ -1,75 +1,56 @@
-# Panneau de configuration Hyprland — v1 « chatbot MCP »
+# hyprpanel-chat — fenêtre Slint cliente chatbot du panneau
 
 ## Contexte
 
-Nouveau projet dans la ferme `mindlog.today` : un **panneau de configuration Hyprland piloté par chatbot**. L'utilisateur dialogue avec Claude Code ou ZCode ; l'agent agit sur le compositeur via un **serveur MCP** (daemon Rust local) qui expose l'état du système, applique des changements à chaud, valide et sauvegarde la config. Cible : Hyprland 0.57.1 avec **config Lua native** (`~/.config/hypr/hyprland.lua`, API `hl.*`), où `monitors.lua`/`inputs.lua` sont **générés par hyprdmc** (lecture seule pour nous).
+Suite de hyprpanel v0.1.0 : l'utilisateur veut maintenant la v2 annoncée — une **UI native Slint en Rust qui est elle-même le client chatbot**. On discute dans la fenêtre ; une boucle d'agent intégrée parle à un LLM (protocole **Anthropic Messages**, streaming token par token), qui appelle les 20 outils du panneau via un **client MCP** (rmcp) connecté au daemon existant `http://127.0.0.1:8765/mcp`. Décisions actées : streaming dès la v1, liaison par MCP (pas in-process), clé Z.ai copiée vers la config du chat (GLM-5.3 via `https://api.z.ai/api/anthropic`).
 
-Décisions actées avec l'utilisateur : daemon **HTTP + jeton Bearer** (auth minimaliste), stack **Rust + rmcp** (Slint réservé à une v2, architecture le permettant), modèle « **MCP état/live, agent édite** » (le serveur ne réécrit pas le Lua), interface **chatbot seul** (pas de page web).
+## Nouveau crate : `crates/hyprpanel-chat` (bin `hyprpanel-chat`)
 
-## Architecture
-
-Daemon `hyprpanel` (bin Rust, service systemd user, pattern `hyprdmc.service` existant) :
-
-- **IPC Hyprland direct** : socket Unix `/run/user/$UID/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock` (protocole `j/…`, `keyword …`, `dispatch …`, `reload`, `configerrors`, `notify …`) — zéro sous-processus. Si la variable d'env est absente (cas des services systemd), scan de `/run/user/$UID/hypr/` pour l'instance la plus récente.
-- **Événements** : connexion à `.socket2.sock` → tâche tokio qui alimente un ring buffer (~200 événements horodatés).
-- **Transport MCP** : `rmcp` 3.x, `StreamableHttpService` (Tower) monté dans **Axum** sur `127.0.0.1:8765/mcp` (port configurable, vérifié libre à l'install).
-- **Auth minimaliste** : jeton hex 256 bits dans `~/.config/hyprpanel/config.toml` (chmod 600), vérifié par middleware Axum — `Authorization: Bearer <token>` **ou** fallback `?key=<token>` en query (au cas où un client MCP ne saurait pas envoyer de headers). Comparaison en temps constant. Bind localhost uniquement. `/health` sans auth (ne divulgue rien).
-
-## Structure du projet
+**License `GPL-3.0-only`** (licence communautaire de Slint — les crates existants restent MIT).
 
 ```
-mindlog.hyprland_tools/
-├── Cargo.toml                    # workspace
-├── .gitignore                    # target/
-├── CLAUDE.md                     # notes projet (convention frères)
-├── README.md
-├── crates/
-│   ├── hyprpanel-core/           # lib réutilisable par la v2 Slint
-│   │   └── src/{lib,ipc,events,hypr_files,backup,settings}.rs
-│   └── hyprpanel-server/         # bin `hyprpanel`
-│       └── src/{main,tools,auth,state}.rs
-├── assets/hyprpanel.service      # modèle systemd (Wants/PartOf=graphical-session.target)
-└── scripts/install.sh
+crates/hyprpanel-chat/
+├── Cargo.toml        # slint 1.18, slint-build, rmcp {client, transport-streamable-http-client-reqwest},
+│                     # reqwest (json+stream+rustls), tokio, serde/serde_json/toml, anyhow, hyprpanel-core
+├── build.rs          # slint_build::compile("ui/chat.slint")
+├── ui/chat.slint     # fenêtre sombre (palette Catppuccin mocha, assortie aux thèmes hypr)
+└── src/
+    ├── main.rs       # config, runtime tokio en thread dédié, boucle d'événements Slint
+    ├── agent.rs      # boucle LLM + parsing SSE + types de messages conversation
+    └── mcp.rs        # wrapper client rmcp (connexion, list_all_tools, call_tool)
 ```
 
-`hyprpanel-core` : client IPC socket, watcher socket2, gestion des fichiers de config (chemins, fichiers « appartenant à hyprdmc »), backup/restore horodatés, parsing du `config.toml`. `hyprpanel-server` : sous-commandes `init` (génère config + jeton), `serve` (rmcp + axum), `check` (diagnostic socket/config), `token` (affiche le jeton) ; les outils MCP (`#[tool]` rmcp) et le middleware auth. Les *server instructions* rmcp documentent la mise en page de la config (Lua `hl.*`, monitors/inputs = read-only, workflow live→édit→reload).
+## Design
 
-## Outils MCP exposés (v1)
+**UI (chat.slint)** — fenêtre ~520×680 : liste de messages (bulles `user` / `assistant` / `outil` / `erreur`), streaming du texte assistant (mise à jour de la dernière bulle à chaque delta), champ de saisie multi-ligne + bouton Envoyer, barre d'état (modèle, « MCP : N outils » ou erreur). `MessageRow { kind, text }` via `VecModel`, mises à jour depuis les tâches tokio par `slint::invoke_from_event_loop` + `Weak`.
 
-- **État** : `hypr_status`, `hypr_monitors`, `hypr_workspaces`, `hypr_clients`, `hypr_devices`, `hypr_get_option` (getoption JSON), `hypr_binds` (tronqué si volumineux)
-- **Live** : `hypr_set_option_live` (keyword — aperçu non persistant), `hypr_dispatch`, `hypr_notify` (retour visuel à l'écran)
-- **Persistance assistée** : `hypr_config_files` (chemins + flags read-only), `hypr_find_setting` (où une option est définie dans les .lua/.conf, file:line), `hypr_backup` / `hypr_list_backups` / `hypr_restore_backup`
-- **Validation** : `hypr_reload` (retourne les configerrors), `hypr_config_errors`
-- **Observabilité** : `hypr_recent_events`, `hypr_screenshot` (via `grim` si présent → chemin PNG lisible par l'agent)
+**Client MCP (mcp.rs)** — squelette validé sur les sources rmcp 3.9 : `StreamableHttpClientTransportConfig::with_uri("http://127.0.0.1:8765/mcp?key=<token>")` (la query passe telle quelle à reqwest → compatible avec notre auth `?key=`), `ClientConfig::default().serve(transport).await` (handshake auto, `peer_info` fournit les instructions serveur), `list_all_tools()`, `call_tool(CallToolRequestParams::new(...).with_arguments(...))`. Token/port lus via **`hyprpanel-core::Settings::load()`** (réutilisation du cœur). Reconnexion au lancement ; erreurs affichées en bulle d'état.
 
-## Installation & enregistrement
+**Boucle d'agent (agent.rs)** — protocole Anthropic Messages :
+- `POST {base_url}/v1/messages` (`x-api-key`, `anthropic-version: 2023-06-01`, `stream: true`)
+- Outils convertis depuis les `Tool` MCP (`name`, `description`, `input_schema` → format Anthropic)
+- System prompt = instructions du serveur (récupérées au handshake) + règles de chat en français
+- Parsing SSE maison (lignes `data:` sur `bytes_stream()`) : `content_block_delta` (`text_delta` → delta UI ; `input_json_delta` → accumulation JSON), `tool_use` complet → bulle « outil X… » → `call_tool` MCP → bulle résultat (tronquée ~400 caractères) → message `tool_result` → **boucle** jusqu'à `stop_reason: end_turn` (garde-fou : 12 itérations max)
+- Timeouts : 120 s LLM, 30 s outil ; erreurs réseau/API en bulles d'erreur
 
-`scripts/install.sh` : `cargo build --release` → binaire vers `~/.local/bin/hyprpanel` → `hyprpanel init` si pas de config → unit systemd user → `daemon-reload` + `enable --now` → affiche le jeton et les commandes d'enregistrement prêtes à coller :
-- Claude Code : `claude mcp add --transport http hyprpanel http://127.0.0.1:8765/mcp --header "Authorization: Bearer <token>"` (scope user)
-- ZCode : entrée `mcp.servers.hyprpanel = { url: "http://127.0.0.1:8765/mcp?key=<token>" }` dans `~/.zcode/cli/config.json`
+**Config** — `~/.config/hyprpanel/chat.toml` (chmod 600) : `base_url` (défaut `https://api.z.ai/api/anthropic`), `api_key`, `model` (défaut `GLM-5.3`), `max_tokens` (défaut 8192), `mcp_url` (optionnel — sinon composé depuis `Settings::load()`). Créée par `hyprpanel-chat init` ; **la clé Z.ai est copiée depuis `~/.zcode/cli/config.json`** (jq, jamais affichée en clair dans les sorties).
 
-L'enregistrement réel sera fait avec votre accord pendant la vérification.
+**Threading** — thread principal : boucle Slint ; thread dédié : runtime tokio multi-thread (session MCP + boucle agent) ; communication UI→agent par `mpsc` dans un `OnceLock`, agent→UI par `invoke_from_event_loop`.
 
-## Conventions dépôt
+## Non-inclus
 
-- `git init` dans `mindlog.hyprland_tools/` + ajout de `mindlog.hyprland_tools/` au `.gitignore` du monorepo (pattern récent « rejoint les sous-dépôts ignorés ») + commit type `docs: mindlog.hyprland_tools rejoint les sous-dépôts ignorés`
-- **Pas de conteneur** (outil desktop local : socket Hyprland + fichiers de config), hors contrat images INFRA.md — statut d'outil hôte, comme hyprdmc
-- Fin de session : rédiger `CONTEXT.md` (< 20 lignes) selon la politique du monorepo
-
-## Hors périmètre v1
-
-Fenêtre Slint (v2, crate séparé réutilisant `hyprpanel-core`), page web de statut, édition du Lua par le serveur, conteneurisation, gestion de wayle/waybar/rofi (lecture seule au mieux via `hypr_config_files`).
+Autostart/keybind (ligne `hl.bind` fournie dans le README à coller dans `hyprland.lua`), historique persistant (la conversation vit le temps de la fenêtre), serveurs MCP additionnels, streaming des résultats d'outils.
 
 ## Vérification
 
-1. `cargo test` — unitaires : protocole socket (messages bien formés), backup/restore (répertoires temporaires), parsing config.toml, middleware auth (401 sans jeton / mauvais jeton, 200 avec, query param)
-2. `hyprpanel check` puis `hyprpanel serve` en avant-plan : `curl` sans jeton → 401 ; avec jeton → handshake MCP (initialize) OK
-3. Service systemd : `systemctl --user status hyprpanel`, health OK après reboot de session (scan socket)
-4. Enregistrement ZCode + Claude Code → les outils apparaissent
-5. **E2E chat réel** : demander à l'agent « augmente les gaps intérieurs à 10, rends-le persistant » → il doit faire `hypr_set_option_live`, éditer `hyprland.lua`, `hypr_reload`, vérifier `hypr_config_errors` vide, constater via `hypr_screenshot` ; puis restauration du backup
+1. `cargo build && cargo test` (workspace complet — tests : parsing SSE sur fixtures, conversion outils MCP→Anthropic, config chat round-trip)
+2. `hyprpanel-chat init` : chat.toml créé en 600 avec la clé, sans fuite dans la sortie
+3. Lancer `hyprpanel-chat` (WAYLAND_DISPLAY hérité) → **capture d'écran via l'outil `hypr_screenshot` du daemon** pour confirmer le rendu de la fenêtre + barre d'état « MCP : 20 outils »
+4. Conversation réelle : « montre l'état de mes écrans » → vérifier : streaming visible, bulles d'outils (`hypr_status`/`hypr_monitors`), réponse correcte ; puis une commande à effet réversible (gaps 12→5) avec notification
+5. Commit du sous-dépôt + mise à jour README/CLAUDE.md/CONTEXT.md
 
 ## Références
 
-- [StreamableHttpService (docs.rs rmcp)](https://docs.rs/rmcp/latest/rmcp/transport/streamable_http_server/tower/struct.StreamableHttpService.html)
-- [Build an MCP Server in Rust with rmcp — ESEO Space](https://eseospace.com/blog/build-mcp-server-rust)
-- [Streamable HTTP MCP Server in Rust — Shuttle](https://shuttle.dev/blog/build-mcp-server-rust)
+- [StreamableHttpService (docs.rs rmcp)](https://docs.rs/rmcp/latest/rmcp/transport/streamable_http_server/tower/struct.StreamableHttpService.html) et sources rmcp 3.9 locales (client : `src/transport/streamable_http_client.rs`, tests `test_streamable_http_connection_reuse.rs`)
+- [slint 1.18.1 — crates.io](https://crates.io/crates/slint), [slint-build](https://crates.io/crates/slint-build)
+- [ESEO Space — MCP server en Rust avec rmcp](https://eseospace.com/blog/build-mcp-server-rust)

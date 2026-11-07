@@ -1,0 +1,165 @@
+import { Button, LineEdit } from "std-widgets.slint";
+
+// Ligne du journal de conversation.
+// kind : "user" | "assistant" | "tool" | "error" | "status"
+export struct MessageRow {
+    kind: string,
+    text: string,
+}
+
+export component ChatWindow inherits Window {
+    title: "hyprpanel — chat";
+    background: #1e1e2e;
+    preferred-width: 560px;
+    preferred-height: 720px;
+    min-width: 400px;
+    min-height: 480px;
+
+    in-out property <string> status: "démarrage…";
+    in-out property <string> model-label: "";
+    in-out property <bool> busy: false;
+    in-out property <[MessageRow]> messages;
+
+    callback send(string);
+    callback new-conversation();
+
+    // Ancre le défilement sur le message le plus récent.
+    public function scroll-bottom() {
+        flick.content-y = Math.max(0px, flick.content-height - flick.height);
+    }
+
+    VerticalLayout {
+        // ── Barre d'état ───────────────────────────────────────────────
+        Rectangle {
+            height: 36px;
+            background: #181825;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 8px;
+                spacing: 8px;
+                alignment: center;
+                Text {
+                    text: "hyprpanel";
+                    color: #cba6f7;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { width: 1px; height: 16px; background: #313244; }
+                Text {
+                    text: root.busy ? root.status + "  ●" : root.status;
+                    color: #a6adc8;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Button {
+                    text: "↺ nouvelle";
+                    enabled: !root.busy;
+                    clicked => { root.new-conversation(); }
+                }
+            }
+        }
+
+        // ── Journal des messages ───────────────────────────────────────
+        flick := Flickable {
+            vertical-stretch: 1;
+            content-height: log.preferred-height;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                log := VerticalLayout {
+                    spacing: 8px;
+                    for row in root.messages: Rectangle {
+                        if row.kind == "status": HorizontalLayout {
+                            alignment: center;
+                            padding: 4px;
+                            Text {
+                                text: row.text;
+                                color: #6c7086;
+                                font-size: 11px;
+                            }
+                        }
+                        if row.kind != "status": Rectangle {
+                            border-radius: 8px;
+                            background: row.kind == "user"      ? #45475a :
+                                        row.kind == "assistant" ? #313244 :
+                                        row.kind == "tool"      ? #181825 :
+                                                                  #472b3d;
+                            height: bubble.preferred-height + 16px;
+                            bubble := HorizontalLayout {
+                                padding: 8px;
+                                spacing: 10px;
+                                alignment: start;
+                                // barre d'accent à gauche, couleur selon le type
+                                Rectangle {
+                                    width: 3px;
+                                    border-radius: 2px;
+                                    background: row.kind == "user"      ? #89b4fa :
+                                                row.kind == "assistant" ? #a6e3a1 :
+                                                row.kind == "tool"      ? #f9e2af :
+                                                                          #f38ba8;
+                                }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Text {
+                                        text: row.kind == "user"      ? "vous" :
+                                              row.kind == "assistant" ? root.model-label :
+                                              row.kind == "tool"      ? "outil" :
+                                                                        "erreur";
+                                        color: row.kind == "user"      ? #89b4fa :
+                                              row.kind == "assistant" ? #a6e3a1 :
+                                              row.kind == "tool"      ? #f9e2af :
+                                                                        #f38ba8;
+                                        font-size: 11px;
+                                        font-weight: 700;
+                                    }
+                                    Text {
+                                        text: row.text;
+                                        color: #cdd6f4;
+                                        font-size: row.kind == "tool" ? 11px : 13px;
+                                        font-family: row.kind == "tool" ? "monospace" : "sans-serif";
+                                        wrap: word-wrap;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Saisie ────────────────────────────────────────────────────
+        Rectangle {
+            background: #181825;
+            height: 52px;
+            HorizontalLayout {
+                padding: 8px;
+                spacing: 8px;
+                alignment: center;
+                le := LineEdit {
+                    horizontal-stretch: 1;
+                    placeholder-text: "Réglage à demander… (Entrée pour envoyer)";
+                    enabled: !root.busy;
+                    accepted(t) => {
+                        if (t != "") {
+                            root.send(t);
+                            le.text = "";
+                        }
+                    }
+                }
+                Button {
+                    text: "envoyer";
+                    enabled: !root.busy && le.text != "";
+                    clicked => {
+                        if (le.text != "") {
+                            root.send(le.text);
+                            le.text = "";
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
