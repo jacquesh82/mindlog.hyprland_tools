@@ -1,0 +1,23 @@
+[package]
+name = "hyprpanel-server"
+description = "Panneau de configuration Hyprland piloté par chatbot — serveur MCP (HTTP + jeton)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hyprpanel"
+path = "src/main.rs"
+
+[dependencies]
+hyprpanel-core = { path = "../hyprpanel-core" }
+rmcp = { version = "3", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "io-util", "signal"] }
+serde.workspace = true
+serde_json.workspace = true
+schemars = "1"
+toml.workspace = true
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

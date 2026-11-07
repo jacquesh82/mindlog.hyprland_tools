@@ -1,0 +1,20 @@
+# Unit systemd user pour hyprpanel — déposée par scripts/install.sh
+# (qui précise WAYLAND_DISPLAY détecté). Modèle : hyprdmc.service.
+[Unit]
+Description=hyprpanel - panneau de configuration Hyprland (serveur MCP)
+PartOf=graphical-session.target
+After=graphical-session.target
+# Hyprland n'est pas encore là dans les premières secondes de session :
+# environ une minute de tentatives avant d'abandonner.
+StartLimitIntervalSec=120
+StartLimitBurst=20
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hyprpanel serve
+Restart=on-failure
+RestartSec=3
+Slice=session.slice
+
+[Install]
+WantedBy=graphical-session.target
