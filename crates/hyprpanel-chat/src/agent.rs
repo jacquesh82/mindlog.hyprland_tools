@@ -45,6 +45,7 @@ pub enum UserEvent {
     },
     FilesystemChanged,
     EnvironmentRefresh,
+    ClearMemory,
 }
 
 const MAX_ROUNDS: usize = 12;
@@ -273,13 +274,14 @@ pub async fn run(
             None
         }
     };
-    if filesystem.approved() {
-        refresh_environment(&weak);
+    let mut environment_ready = filesystem.approved();
+    if environment_ready {
+        refresh_environment(&weak, &filesystem, &approvals, &translations).await;
     }
     let mut functions = available_functions(mcp.as_ref(), &filesystem);
 
     let mut llm = build_llm(&cfg, &functions);
-    let mut system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
+    let mut system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
     let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
     let mut ledger = Ledger::load(crate::chat_config::state_history_path());
@@ -299,14 +301,18 @@ pub async fn run(
         };
         match event {
             UserEvent::FilesystemChanged => {
-                if filesystem.approved() {
-                    refresh_environment(&weak);
+                if filesystem.approved() && !environment_ready {
+                    refresh_environment(&weak, &filesystem, &approvals, &translations).await;
+                    environment_ready = true;
                 } else {
-                    set_environment(&weak, String::new());
+                    if !filesystem.approved() {
+                        environment_ready = false;
+                        set_environment(&weak, String::new());
+                    }
                 }
                 functions = available_functions(mcp.as_ref(), &filesystem);
                 llm = build_llm(&cfg, &functions);
-                system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                 convo[0] = Message::new_system_message(system.clone());
                 if !filesystem.approved() {
                     convo.truncate(1);
@@ -314,13 +320,25 @@ pub async fn run(
             }
             UserEvent::EnvironmentRefresh => {
                 if filesystem.approved() {
-                    refresh_environment(&weak);
-                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
+                    refresh_environment(&weak, &filesystem, &approvals, &translations).await;
+                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                     convo[0] = Message::new_system_message(system.clone());
                 }
             }
             UserEvent::Choice { .. } => unreachable!("choix normalisé en message utilisateur"),
+            UserEvent::ClearMemory => match crate::memory::clear() {
+                Ok(()) => {
+                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+                    convo = vec![Message::new_system_message(system.clone())];
+                    ui::clear(&weak);
+                    ui::set_status(&weak, &translations.memory_cleared);
+                }
+                Err(error) => {
+                    ui::append(&weak, "error", format!("Mémoire : {error:#}"));
+                }
+            },
             UserEvent::Reset => {
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                 convo = vec![Message::new_system_message(system.clone())];
                 ui::clear(&weak);
                 ui::set_status(&weak, &translations.new_conversation);
@@ -329,7 +347,7 @@ pub async fn run(
                 cfg = *new_cfg;
                 translations = tr(cfg.lang());
                 ui::set_tr(&weak, translations.to_slint());
-                system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                 convo[0] = Message::new_system_message(system.clone());
                 llm = build_llm(&cfg, &functions);
                 ui::set_status(&weak, &translations.settings_saved);
@@ -340,6 +358,17 @@ pub async fn run(
                 files,
                 pasted_images: _pasted_images,
             } => {
+                // Recherche avant l'ajout de la demande courante : elle ne se retrouve pas elle-même.
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, Some(&text));
+                convo[0] = Message::new_system_message(system.clone());
+                if let Err(error) = crate::memory::remember(
+                    filesystem.approved(),
+                    cfg.memory_enabled,
+                    &text,
+                    choice_display.is_some(),
+                ) {
+                    ui::append(&weak, "error", format!("Mémoire locale : {error:#}"));
+                }
                 let visible_text = choice_display.as_deref().unwrap_or(&text);
                 let mut bubble = visible_text.to_string();
                 for f in &files {
@@ -466,12 +495,147 @@ fn set_environment(weak: &Weak<ChatWindow>, text: String) {
     });
 }
 
-fn refresh_environment(weak: &Weak<ChatWindow>) {
-    match crate::environment::refresh_at(&crate::environment::path()) {
-        Ok(profile) => set_environment(
-            weak,
-            serde_json::to_string_pretty(&profile).unwrap_or_default(),
-        ),
+async fn refresh_environment(
+    weak: &Weak<ChatWindow>,
+    filesystem: &Arc<crate::filesystem::FilesystemAccess>,
+    approvals: &crate::commands::Approvals,
+    translations: &Tr,
+) {
+    ui::set_busy(weak, true);
+    ui::set_status(weak, &translations.environment_scanning);
+    ui::set_activity(weak, "tools");
+    let result = async {
+        filesystem.require_approval()?;
+        let mut profile = crate::environment::prepare(&crate::environment::path())?;
+        let fs = filesystem.clone();
+        let managers = profile.package_managers.clone();
+        let progress_weak = weak.clone();
+        let progress_tr = translations.clone();
+        let mut inventory = tokio::task::spawn_blocking(move || {
+            let mut previous = String::new();
+            let mut last = std::time::Instant::now();
+            crate::inventory::discover_with_progress(
+                &fs,
+                Path::new("/"),
+                &managers,
+                |phase, done, total| {
+                    if phase == previous && total != Some(done) && last.elapsed().as_millis() < 80 {
+                        return;
+                    }
+                    previous = phase.into();
+                    last = std::time::Instant::now();
+                    let name = match phase {
+                        "configurations" => progress_tr.inventory_configurations.clone(),
+                        "launchers" => progress_tr.inventory_launchers.clone(),
+                        "packages" => progress_tr.inventory_packages.clone(),
+                        other => format!("{} ({other})", progress_tr.inventory_packages),
+                    };
+                    let label = match total {
+                        Some(total) => format!("{name} · {done}/{total}"),
+                        None => format!("{name} · {done}"),
+                    };
+                    ui::set_progress(
+                        &progress_weak,
+                        label,
+                        total.map(|total| {
+                            if total == 0 {
+                                1.
+                            } else {
+                                done as f32 / total as f32
+                            }
+                        }),
+                    );
+                },
+            )
+        })
+        .await??;
+        let mut declined = false;
+        let plans = std::mem::take(&mut inventory.plans);
+        let total = plans.len();
+        for (index, query) in plans.into_iter().enumerate() {
+            if declined {
+                inventory.record(query.manager, "not_queried_after_decline", Vec::new(), None);
+                continue;
+            }
+            filesystem.require_approval()?;
+            ui::set_progress(
+                weak,
+                format!(
+                    "{} · {}/{} · {}",
+                    translations.inventory_queries,
+                    index + 1,
+                    total,
+                    query.manager
+                ),
+                None,
+            );
+            let reason = translations.environment_query.replace("{}", query.manager);
+            let confirmation = approvals.request(weak, query.command.into(), reason.clone());
+            let request = crate::commands::Request {
+                command: query.command.into(),
+                reason,
+            };
+            match crate::commands::run_inventory(request, filesystem, confirmation).await {
+                Ok(output) if output["status"] == "declined" => {
+                    declined = true;
+                    inventory.record(query.manager, "declined", Vec::new(), None);
+                }
+                Ok(output) if output["success"] == true && output["truncated"] != true => {
+                    match crate::inventory::parse_query(
+                        query.manager,
+                        output["stdout"].as_str().unwrap_or(""),
+                    ) {
+                        Ok(packages) => {
+                            inventory.record(query.manager, "confirmed_query", packages, None)
+                        }
+                        Err(error) => inventory.record(
+                            query.manager,
+                            "failed",
+                            Vec::new(),
+                            Some(error.to_string()),
+                        ),
+                    }
+                }
+                Ok(output) => inventory.record(
+                    query.manager,
+                    "failed",
+                    Vec::new(),
+                    Some(
+                        if output["truncated"] == true {
+                            "query output exceeded limit"
+                        } else {
+                            "query failed or timed out"
+                        }
+                        .into(),
+                    ),
+                ),
+                Err(error) => {
+                    inventory.record(query.manager, "failed", Vec::new(), Some(error.to_string()))
+                }
+            }
+        }
+        filesystem.require_approval()?;
+        ui::set_progress(weak, translations.inventory_saving.clone(), None);
+        profile.desktop_tools = inventory.finish();
+        profile.inventory_sources = inventory.sources;
+        profile.inventory_limits = inventory.limits.into_iter().collect();
+        for source in &profile.inventory_sources {
+            if !profile.package_managers.contains(&source.manager) {
+                profile.package_managers.push(source.manager.clone());
+            }
+        }
+        crate::environment::save(&crate::environment::path(), &profile)?;
+        Ok::<_, anyhow::Error>(profile)
+    }
+    .await;
+    match result {
+        Ok(profile) => {
+            set_environment(
+                weak,
+                serde_json::to_string_pretty(&profile).unwrap_or_default(),
+            );
+            ui::set_status(weak, &translations.environment_refreshed);
+        }
         Err(error) => {
             ui::append(
                 weak,
@@ -480,6 +644,7 @@ fn refresh_environment(weak: &Weak<ChatWindow>) {
             );
         }
     };
+    ui::set_busy(weak, false);
 }
 
 fn available_functions(
@@ -516,6 +681,7 @@ fn runtime_system(
     cfg: &ChatConfig,
     mcp: Option<&McpSession>,
     filesystem: &crate::filesystem::FilesystemAccess,
+    query: Option<&str>,
 ) -> String {
     let mut instructions = mcp.and_then(|m| m.instructions()).unwrap_or_default();
     let directory = if filesystem.approved() {
@@ -538,6 +704,12 @@ fn runtime_system(
     });
     instructions.push_str("\n\n");
     instructions.push_str(&crate::environment::context(filesystem.approved()));
+    if let Some(query) = query {
+        instructions.push_str(
+            &crate::memory::recall(filesystem.approved(), cfg.memory_enabled, query)
+                .unwrap_or_default(),
+        );
+    }
     instructions.push_str(&format!(
         "\nCurrent UTC time: {}",
         timefmt::iso(std::time::SystemTime::now())

@@ -22,6 +22,50 @@ export global AvatarFrames {
     in-out property <image> blink;
 }
 
+export component WorkProgress inherits VerticalLayout {
+    in property <string> label;
+    in property <string> a11y-label: root.label;
+    in property <float> progress: 0;
+    in property <bool> indeterminate: true;
+    in property <bool> animated: true;
+    private property <float> phase: 0;
+    min-height: root.label == "" ? 6px : 28px;
+    preferred-height: root.label == "" ? 6px : 28px;
+    max-height: root.label == "" ? 6px : 28px;
+    vertical-stretch: 0;
+    Timer {
+        interval: 80ms;
+        running: root.indeterminate && root.animated;
+        triggered => { root.phase = mod(root.phase + 0.08, 2); }
+    }
+    spacing: 6px;
+    if root.label != "": Text {
+        text: root.label;
+        color: Theme.secondary;
+        font-size: 12px;
+        overflow: elide;
+    }
+    Rectangle {
+        height: 6px;
+        horizontal-stretch: 1;
+        background: Theme.raised;
+        border-radius: 3px;
+        clip: true;
+        accessible-role: progress-indicator;
+        accessible-label: root.a11y-label;
+        accessible-value: root.indeterminate ? "" : root.progress;
+        accessible-value-minimum: 0.0;
+        accessible-value-maximum: 1.0;
+        Rectangle {
+            height: parent.height;
+            width: root.indeterminate ? parent.width / 3 : parent.width * clamp(root.progress, 0, 1);
+            x: root.indeterminate ? -self.width + (parent.width + self.width) * root.phase / 2 : 0px;
+            border-radius: 3px;
+            background: Theme.accent;
+        }
+    }
+}
+
 export component Avatar inherits Rectangle {
     in property <bool> animated: false;
     in property <bool> engaged: false;

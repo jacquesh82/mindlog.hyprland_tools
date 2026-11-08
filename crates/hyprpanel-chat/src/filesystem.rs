@@ -151,6 +151,15 @@ impl FilesystemAccess {
         Ok(())
     }
 
+    /// L'inventaire partage les mêmes limites de chemins que les outils LLM.
+    pub(crate) fn inventory_path(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        self.resolve(&path.to_string_lossy(), false)
+    }
+
+    pub(crate) fn inventory_text(&self, path: &Path) -> anyhow::Result<String> {
+        Self::read_text(&self.inventory_path(path)?)
+    }
+
     fn read_text(path: &Path) -> anyhow::Result<String> {
         let file = std::fs::File::open(path)?;
         ensure!(file.metadata()?.is_file(), "fichier ordinaire attendu");

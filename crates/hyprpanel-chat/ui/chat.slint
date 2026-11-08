@@ -4,7 +4,7 @@ export { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
 import { RichContent } from "rich-content.slint";
 export { SwatchRow, ChoiceOptionRow } from "choice-types.slint";
 import { Button, LineEdit, ComboBox, TextEdit, Palette, Spinner, CheckBox, ScrollView } from "std-widgets.slint";
-import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader, ToolDetails, ChoiceCard } from "components.slint";
+import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader, ToolDetails, ChoiceCard, WorkProgress } from "components.slint";
 export { AvatarFrames } from "components.slint";
 
 // ─── Structures de données ────────────────────────────────────────────────
@@ -52,6 +52,7 @@ export struct TrTexts {
     settings-saved: string, settings-invalid: string,
     settings-motion: string,
     settings-scope: string, settings-scope-hint: string,
+    memory-title: string, memory-hint: string, memory-clear: string, memory-confirm: string, memory-cleared: string,
     settings-context: string, settings-context-hint: string, settings-context-invalid: string,
     fs-title: string, fs-body: string, fs-note: string, fs-allow: string, fs-refuse: string,
     fs-granted: string, fs-denied: string, fs-request: string, fs-revoke: string,
@@ -88,6 +89,9 @@ export component ChatWindow inherits Window {
     in-out property <int> provider-index: 0;
     in-out property <bool> busy: false;
     in-out property <string> activity: "thinking";
+    in-out property <string> task-label;
+    in-out property <float> task-progress: 0;
+    in-out property <bool> task-indeterminate: true;
     in-out property <bool> animations-enabled: true;
     in-out property <float> avatar-time: -1;
     in-out property <bool> follow-output: true;
@@ -107,12 +111,15 @@ export component ChatWindow inherits Window {
     in-out property <string> settings-error;
     in-out property <bool> cfg-animate-avatar: true;
     in-out property <bool> cfg-limit-wayland-scope: true;
+    in-out property <bool> cfg-memory-enabled: true;
+    callback clear-memory();
     in-out property <string> cfg-system-context;
     in-out property <bool> fs-approved: false;
     in-out property <string> fs-root: "~/.config";
     private property <string> fs-return-overlay: "none";
     callback filesystem-decision(bool);
     in-out property <int> command-id: 0;
+    in-out property <string> command-return-overlay: "none";
     in-out property <string> command-text;
     in-out property <string> command-reason;
     callback command-decision(int, bool);
@@ -208,7 +215,7 @@ export component ChatWindow inherits Window {
     }
 
     private property <length> choice-anchor;
-    private property <length> activity-row-height: 40px;
+    private property <length> activity-row-height: root.task-label == "" ? 54px : 40px;
     public function prepare-choice() {
         root.follow-output = false;
         // Le choix est inséré avant l'indicateur transitoire de fin du journal.
@@ -505,8 +512,11 @@ export component ChatWindow inherits Window {
                     }
 
                     // Indicateur transitoire : indépendant des messages et détails d'outils.
-                    if root.busy: HorizontalLayout {
+                    if root.busy: VerticalLayout {
                         height: root.activity-row-height;
+                        spacing: 4px;
+                        HorizontalLayout {
+                        height: 40px;
                         spacing: 10px;
                         Avatar {
                             width: 32px; height: 32px;
@@ -517,7 +527,7 @@ export component ChatWindow inherits Window {
                         }
                         Spinner {
                             width: 16px; height: 16px; y: 12px;
-                            indeterminate: true;
+                            indeterminate: root.overlay == "none" && !root.minimized;
                             accessible-label: root.activity-label();
                         }
                         Text {
@@ -527,7 +537,31 @@ export component ChatWindow inherits Window {
                             vertical-alignment: center;
                         }
                         Rectangle { horizontal-stretch: 1; }
+                        }
+                        if root.task-label == "": WorkProgress {
+                            a11y-label: root.activity-label();
+                            progress: root.task-progress;
+                            indeterminate: root.task-indeterminate;
+                            animated: root.overlay == "none" && !root.minimized && root.animations-enabled;
+                        }
                     }
+                }
+            }
+
+            // La progression d'une tâche reste visible même si le journal est remonté.
+            if root.busy && root.task-label != "": Rectangle {
+                preferred-height: 44px;
+                min-height: 44px;
+                max-height: 44px;
+                WorkProgress {
+                    x: (parent.width - self.width) / 2;
+                    y: 6px;
+                    width: root.column-width;
+                    height: 28px;
+                    label: root.task-label;
+                    progress: root.task-progress;
+                    indeterminate: root.task-indeterminate;
+                    animated: root.overlay == "none" && !root.minimized && root.animations-enabled;
                 }
             }
 
@@ -727,6 +761,11 @@ export component ChatWindow inherits Window {
                             vertical-stretch: 1;
                         }
                         Text { text: root.tr.command-note; color: Theme.secondary; wrap: word-wrap; font-size: 13px; }
+                        if root.busy && root.task-label != "": WorkProgress {
+                            label: root.task-label + " — " + root.tr.command-waiting;
+                            progress: root.task-progress;
+                            indeterminate: false;
+                        }
                         HorizontalLayout {
                             alignment: end;
                             spacing: 12px;
@@ -804,12 +843,30 @@ export component ChatWindow inherits Window {
                     }
 
                     // ── RÉGLAGES ──────────────────────────────────────────
+                    if root.overlay == "memory": VerticalLayout {
+                        spacing: 16px;
+                        PanelHeader { title: root.tr.memory-clear; close-label: root.tr.close; close => { root.close-overlay(); } }
+                        Text { text: root.tr.memory-confirm; wrap: word-wrap; color: Theme.text; font-size: 14px; }
+                        Rectangle { vertical-stretch: 1; }
+                        HorizontalLayout {
+                            spacing: 12px;
+                            alignment: end;
+                            ActionButton { text: root.tr.cancel; clicked => { root.close-overlay(); } }
+                            ActionButton { text: root.tr.memory-clear; primary: true; clicked => { root.clear-memory(); } }
+                        }
+                    }
                     if root.overlay == "settings": VerticalLayout {
                         spacing: 8px;
                         PanelHeader {
                             close-label: root.tr.close;
                             title: root.tr.settings-title;
                             close => { root.close-overlay(); }
+                        }
+                        if root.busy: WorkProgress {
+                            label: root.task-label == "" ? root.activity-label() : root.task-label;
+                            progress: root.task-progress;
+                            indeterminate: root.task-indeterminate;
+                            animated: !root.minimized && root.animations-enabled;
                         }
                         if root.settings-error != "": Text {
                             text: root.settings-error;
@@ -855,6 +912,13 @@ export component ChatWindow inherits Window {
                                         color: Theme.secondary;
                                         font-size: 12px;
                                         wrap: word-wrap;
+                                    }
+                                    CheckBox { text: root.tr.memory-title; checked <=> root.cfg-memory-enabled; }
+                                    Text { text: root.tr.memory-hint; color: Theme.secondary; font-size: 12px; wrap: word-wrap; }
+                                    ActionButton {
+                                        text: root.tr.memory-clear;
+                                        enabled: !root.busy;
+                                        clicked => { root.overlay = "memory"; }
                                     }
                                     HorizontalLayout {
                                         min-height: 38px;
@@ -945,7 +1009,7 @@ export component ChatWindow inherits Window {
                                     }
                                     ActionButton {
                                         text: root.tr.environment-refresh;
-                                        enabled: root.fs-approved;
+                                        enabled: root.fs-approved && !root.busy;
                                         clicked => { root.refresh-environment(); }
                                     }
                                     Text {

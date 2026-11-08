@@ -24,6 +24,8 @@ Paste an image with **Ctrl+V**, **Shift+Insert**, or the clipboard button. It st
 in the draft until you send it; ordinary text paste still works.
 Responses appear progressively as LYRA writes, with a visible thinking indicator
 while it prepares its answer.
+Long operations show their current phase and progress. When the amount of work
+is unknown, the indicator stays indeterminate.
 
 Interface color suggestions follow the [color accessibility policy](docs/COLOR_ACCESSIBILITY.md):
 computed WCAG contrast, corrections for failing BG/FG pairs, and checks across states.
@@ -82,20 +84,30 @@ use the filesystem permission.
 
 After your first filesystem approval, LYRA records the OS/distribution, version,
 kernel, architecture, username, session, and available package/desktop tools in a
-private local profile. It runs no commands to discover these details. The profile
+private local profile. Basic OS discovery requires no commands. The profile
 is refreshed each approved session and can be viewed/refreshed in Settings.
-Missing tool versions stay unknown until checked with a confirmed command.
+Installed tools are discovered from package metadata, desktop launchers, and your
+approved configuration files. Versions and configuration paths include their source;
+missing versions stay unknown. Additional package-manager queries always ask for
+command confirmation first.
+
+The local mini-RAG recalls relevant excerpts from your requests and clicked choices,
+along with installed tools that match the current question. It searches locally,
+without an embedding service. Relevant excerpts are included in the context sent
+to your selected provider. It starts after filesystem consent and works across
+conversations and providers.
 
 ## Settings and backups
 
 - **⚙ Settings**: choose English or French, a model, and whether the avatar animates.
 - **SYSTEM context**: set your own instructions for all providers. Leave it empty to use LYRA’s default role.
+- **Local conversation memory**: disable recall and recording, or clear saved excerpts and start a new chat.
 - **⟲ History**: browse saved configurations and restore a backup.
 - **Tool details**: expand the link in the chat to inspect the operations performed.
 
 Live settings let you try changes. Once filesystem access is approved, LYRA requests a configuration backup before
 each message. The conversation lasts for the current window session; configuration
-backups remain available after you close it.
+backups and enabled local memory remain available after you close it.
 
 ## Need help?
 

@@ -12,7 +12,10 @@ use crate::MessageRow;
 
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
-fn queue(weak: &Weak<ChatWindow>, op: impl FnOnce(&ChatWindow, &slint::VecModel<MessageRow>) + Send + 'static) {
+fn queue(
+    weak: &Weak<ChatWindow>,
+    op: impl FnOnce(&ChatWindow, &slint::VecModel<MessageRow>) + Send + 'static,
+) {
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
@@ -35,8 +38,14 @@ pub fn append(weak: &Weak<ChatWindow>, kind: &str, text: impl Into<String>) -> u
         if kind == "user" {
             ui.set_follow_output(true);
         }
-        let mut row = MessageRow { kind: kind.into(), text: text.into(), ..Default::default() };
-        if let Some(rich) = rich { rich.apply(&mut row); }
+        let mut row = MessageRow {
+            kind: kind.into(),
+            text: text.into(),
+            ..Default::default()
+        };
+        if let Some(rich) = rich {
+            rich.apply(&mut row);
+        }
         model.push(row);
     });
     idx
@@ -54,8 +63,14 @@ pub fn set_row(weak: &Weak<ChatWindow>, idx: usize, kind: &str, text: &str) {
     let rich = (kind == "assistant").then(|| crate::rich_text::parse(&text));
     queue(weak, move |_, model| {
         if idx < model.row_count() {
-            let mut row = MessageRow { kind: kind.into(), text: text.into(), ..Default::default() };
-            if let Some(rich) = rich { rich.apply(&mut row); }
+            let mut row = MessageRow {
+                kind: kind.into(),
+                text: text.into(),
+                ..Default::default()
+            };
+            if let Some(rich) = rich {
+                rich.apply(&mut row);
+            }
             model.set_row_data(idx, row);
         }
     });
@@ -89,7 +104,6 @@ pub fn offer_choices(weak: &Weak<ChatWindow>, request: crate::choices::ChoiceReq
     });
 }
 
-
 pub fn set_status(weak: &Weak<ChatWindow>, status: impl Into<String>) {
     let status = status.into();
     let weak = weak.clone();
@@ -105,9 +119,24 @@ pub fn set_busy(weak: &Weak<ChatWindow>, busy: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_busy(busy);
+            ui.set_task_label("".into());
+            ui.set_task_progress(0.);
+            ui.set_task_indeterminate(true);
             if !busy && ui.get_overlay() == "none" {
                 ui.invoke_focus_composer();
             }
+        }
+    });
+}
+
+/// Progression mesurée par phase ; None signifie une durée/quantité inconnue.
+pub fn set_progress(weak: &Weak<ChatWindow>, label: String, progress: Option<f32>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_task_label(label.into());
+            ui.set_task_progress(progress.unwrap_or(0.).clamp(0., 1.));
+            ui.set_task_indeterminate(progress.is_none());
         }
     });
 }
@@ -130,8 +159,14 @@ pub fn attachment_push(weak: &Weak<ChatWindow>, name: &str, meta: &str) {
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         let model = ui.get_attachments();
-        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::AttachmentRow>>() {
-            m.push(crate::AttachmentRow { name: name.into(), meta: meta.into() });
+        if let Some(m) = model
+            .as_any()
+            .downcast_ref::<slint::VecModel<crate::AttachmentRow>>()
+        {
+            m.push(crate::AttachmentRow {
+                name: name.into(),
+                meta: meta.into(),
+            });
         }
     });
 }
@@ -142,7 +177,10 @@ pub fn attachment_remove(weak: &Weak<ChatWindow>, idx: usize) {
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         let model = ui.get_attachments();
-        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::AttachmentRow>>() {
+        if let Some(m) = model
+            .as_any()
+            .downcast_ref::<slint::VecModel<crate::AttachmentRow>>()
+        {
             if idx < m.row_count() {
                 m.remove(idx);
             }
@@ -156,7 +194,10 @@ pub fn attachments_clear(weak: &Weak<ChatWindow>) {
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         let model = ui.get_attachments();
-        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::AttachmentRow>>() {
+        if let Some(m) = model
+            .as_any()
+            .downcast_ref::<slint::VecModel<crate::AttachmentRow>>()
+        {
             m.set_vec(Vec::new());
         }
     });
@@ -179,7 +220,10 @@ pub fn history_set(weak: &Weak<ChatWindow>, records: &[crate::agent::TurnRecord]
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         let model = ui.get_history();
-        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::HistoryRow>>() {
+        if let Some(m) = model
+            .as_any()
+            .downcast_ref::<slint::VecModel<crate::HistoryRow>>()
+        {
             m.set_vec(rows);
         }
     });

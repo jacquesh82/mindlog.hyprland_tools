@@ -57,6 +57,8 @@ pub struct ChatConfig {
     pub system_context: String,
     #[serde(default = "default_scope_limit")]
     pub limit_wayland_scope: bool,
+    #[serde(default = "default_memory_enabled")]
+    pub memory_enabled: bool,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -117,6 +119,10 @@ fn default_scope_limit() -> bool {
     true
 }
 
+fn default_memory_enabled() -> bool {
+    true
+}
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
 }
@@ -148,6 +154,7 @@ impl ChatConfig {
             codex_model: String::new(),
             system_context: String::new(),
             limit_wayland_scope: true,
+            memory_enabled: true,
             base_url: ZCODE_SUBSCRIPTION_URL.into(),
             api_key: String::new(),
             model: "GLM-5.3".into(),
@@ -307,9 +314,28 @@ mod tests {
         assert_eq!(reloaded.model, c.model);
         assert_eq!(reloaded.max_tokens, c.max_tokens);
         assert!(reloaded.animate_avatar);
+        assert!(reloaded.memory_enabled);
         assert_eq!(
             reloaded.mcp_url.as_deref(),
             Some("http://127.0.0.1:1/mcp?key=x")
+        );
+    }
+
+    #[test]
+    fn memory_migrates_old_settings_and_can_be_disabled() {
+        let mut cfg = ChatConfig::defaults();
+        let old = cfg
+            .as_toml()
+            .lines()
+            .filter(|line| !line.starts_with("memory_enabled"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(toml::from_str::<ChatConfig>(&old).unwrap().memory_enabled);
+        cfg.memory_enabled = false;
+        assert!(
+            !toml::from_str::<ChatConfig>(&cfg.as_toml())
+                .unwrap()
+                .memory_enabled
         );
     }
 

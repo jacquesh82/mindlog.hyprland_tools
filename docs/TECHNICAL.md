@@ -30,6 +30,7 @@ Default locations, adjusted when the corresponding XDG variables are set:
 | `~/.local/state/hyprpanel/file-backups/` | Previous contents saved before file-tool replacements |
 | `~/.local/state/hyprpanel/lyra-history.json` | Backup records associated with chat turns |
 | `~/.local/state/hyprpanel/environment.json` | Private local environment profile, created after filesystem approval |
+| `~/.local/state/hyprpanel/memory.json` | Bounded local mini-RAG records from user requests and clicked choices |
 | `~/.cache/hyprpanel/screenshots/` | Screenshots |
 
 Configuration files are created with `600` permissions. To initialize them
@@ -83,20 +84,93 @@ as stated in the approval dialog.
 
 ### Local environment memory
 
-After the startup filesystem consent, LYRA creates or refreshes `environment.json`
-without executing commands. It reads the standard `os-release` fields, the kernel
-release, a small allowlist of environment variables, and executable presence in
-`PATH`. It records OS/distribution/version, architecture, username/home/shell,
-graphical session, and available package managers and desktop tools. It does not
-scan personal files, read credentials, or collect an environment-variable dump.
+After filesystem consent, LYRA creates or refreshes schema 2 `environment.json`.
+Basic discovery reads standard `os-release` fields, kernel release, a small
+allowlist of session variables, and executable presence in `PATH`. It records
+OS/distribution/version, architecture, username/home/shell and graphical session.
+It does not execute binaries to get their versions or collect an environment dump.
 
-The profile uses an atomic write with mode `0600` in a `0700` state directory.
-`first_seen` survives refreshes; `observed_at` records the latest observation.
-Settings displays the stored JSON and offers an explicit refresh. Approved
-sessions inject this profile as observed data into SYSTEM for all providers;
-revocation removes it from future context. Values are never treated as instructions.
-The consent dialog states that profile data can be sent to the selected provider.
-Executable presence does not imply a running service or a known software version.
+`desktop_tools` is a dynamic inventory, not a hardcoded application list. Discovery
+cross-references installed package files, desktop launchers and configuration
+names/launch references in the approved configuration directory.
+
+| Mechanism | Installed metadata |
+| --- | --- |
+| Pacman | Local `desc`/`files` database; confirmed `pacman -Q/-Ql` fallback |
+| DEB / dpkg | Installed entries in `status`, including held packages, plus architecture-aware `.list` ownership; confirmed `dpkg-query` fallback |
+| RPM | Confirmed `rpm -qa` query for name, version/release and owned files |
+| APK | Local installed database; confirmed `apk list --installed` fallback |
+| Portage | Local package `CONTENTS` database |
+| Flatpak / Snap | Confirmed application/package listing |
+| Nix | Confirmed profile JSON or legacy `nix-env` JSON; derivation-derived versions are labeled |
+| Homebrew | Confirmed installed formula/cask JSON, using installed versions |
+| XBPS / pipx / Cargo | Confirmed installed-package JSON/text listing |
+| Manual installs / AppImage | Existing executable references from configs or desktop launchers; version remains unknown |
+
+Every command uses the same native, single-use approval dialog as chat commands,
+with a 60-second timeout and a 32 MiB inventory output cap. Declining stops the
+remaining queries for that refresh; there is no silent shell fallback. Query
+output is parsed into selected metadata, never copied raw into model context.
+
+Each tool records the manager/package, package version and provenance, executable
+paths, observed application configs, launch references (`referenced_by`), declared
+package config defaults and selection evidence. A package version is not proof of
+the running binary's version; a config match is not proof that it is active.
+`inventory_sources` and `inventory_limits` report failures, refusals and truncation.
+Unreadable, missing and manually installed versions remain unknown.
+
+Config traversal uses the existing filesystem gateway: no access before consent,
+no escape through symlinks, private LYRA/generated files protected. Credential-like
+names and browser storage/cache directories are skipped. It examines at most
+6,000 entries, depth 4 and 4 MiB of config text, with a 64 KiB per-file read limit.
+Launch command strings are parsed as data and never executed. Native package
+sources are capped at 20,000 packages and the tool inventory at 256 entries.
+Selected tool metadata is capped at 1 MiB; the complete profile has a 2 MiB limit.
+
+Profiles are written atomically with mode `0600` in a `0700` state directory.
+`first_seen` survives schema migration and refreshes; `observed_at` tracks freshness.
+Settings shows the full JSON and provides refresh. SYSTEM receives a compact OS
+summary/tool-name index; the mini-RAG retrieves matching tool details on each send.
+All three providers share this context. Revoking filesystem access removes the
+profile/recalls from future context and resets the active model conversation.
+
+### Local conversation mini-RAG
+
+`memory.rs` implements bounded lexical retrieval (BM25, French/English tokenization)
+without an embedding model, remote vector database or background indexer. Each send
+retrieves up to five documents, capped at 6,000 text characters: matching historical
+requests/choices and current inventory entries. The two latest user records can
+supply continuity for short follow-up requests. Retrieval precedes recording the
+current request, so a message cannot retrieve itself.
+
+`memory.json` stores up to 192 excerpts of 1,800 characters with timestamps and
+explicit `user_request` / `user_choice` provenance. Requests are intentions, never
+evidence that an action succeeded. Assistant proposals, tool outputs, attachment
+contents and images are not indexed. A conservative heuristic skips messages with
+credential-like markers or URLs; it is not a general secret detector. Clicked
+choices retain question/label/value/colors but discard source URLs. Writes are
+atomic and private (`0600`, directory `0700`), with a 2 MiB read/write bound.
+
+Conversation recall and recording require both filesystem consent and
+`memory_enabled` (default true, including older configs). Settings can disable them
+without deleting records, or explicitly clear the file and start a new conversation.
+Clearing keeps the environment profile and configuration backup history. The system
+profile remains available with filesystem consent even if conversation memory is off.
+New Chat keeps saved memory; changing provider uses the same local store. There are
+no per-keystroke scans. Relevant retrieved data is sent to the selected subscription
+provider as part of its request, with explicit untrusted-data/source boundaries
+before the mandatory permission, scope and color policies.
+
+### Long-operation feedback
+
+The chat and Settings display a progress bar during inventory. Native package
+loops show processed/total counts where known; config and launcher scans show
+counts while their total is unknown. Each phase has its own measured progress,
+not an estimated global percentage. External queries and other waits remain
+indeterminate; command approval pauses the indicator. Progress events are throttled
+to 80 ms. The bar uses contrast-tested semantic tokens and an accessible progress
+role/value. Its small animation runs at 12.5 Hz only while needed and pauses behind
+modals/minimized windows; disabling animations also freezes it.
 
 ### Online verification
 

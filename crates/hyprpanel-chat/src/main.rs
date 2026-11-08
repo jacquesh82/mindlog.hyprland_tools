@@ -12,7 +12,9 @@ mod contrast;
 mod environment;
 mod filesystem;
 mod i18n;
+mod inventory;
 mod mcp;
+mod memory;
 mod providers;
 mod reliability;
 mod rich_text;
@@ -93,6 +95,12 @@ fn main() -> anyhow::Result<()> {
                     .parent()
                     .context("dossier des réglages")?
                     .to_path_buf(),
+            )
+            .protect_directory(
+                chat_config::state_history_path()
+                    .parent()
+                    .context("dossier de données")?
+                    .to_path_buf(),
             ),
     );
 
@@ -102,6 +110,7 @@ fn main() -> anyhow::Result<()> {
     app.set_model_label(cfg.model_label().into());
     app.set_animations_enabled(cfg.animate_avatar);
     app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
+    app.set_cfg_memory_enabled(cfg.memory_enabled);
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_tr(i18n::tr(cfg.lang()).to_slint());
     app.set_fs_root(filesystem.root().to_string_lossy().to_string().into());
@@ -148,7 +157,8 @@ fn main() -> anyhow::Result<()> {
         app.on_command_decision(move |id, approved| {
             if let Some(app) = weak.upgrade() {
                 if app.get_overlay() == "command" && app.get_command_id() == id {
-                    app.set_overlay("none".into());
+                    app.set_overlay(app.get_command_return_overlay());
+                    app.set_command_return_overlay("none".into());
                     app.set_command_text("".into());
                     app.set_command_reason("".into());
                     app.set_activity("tools".into());
@@ -166,6 +176,19 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         app.on_refresh_environment(move || {
             let _ = tx.send(agent::UserEvent::EnvironmentRefresh);
+        });
+    }
+    {
+        let tx = tx.clone();
+        let weak = app.as_weak();
+        app.on_clear_memory(move || {
+            if let Some(app) = weak.upgrade() {
+                if app.get_busy() || app.get_overlay() != "memory" {
+                    return;
+                }
+                app.set_overlay("settings".into());
+                let _ = tx.send(agent::UserEvent::ClearMemory);
+            }
         });
     }
     {
@@ -320,6 +343,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_cfg_api_key(cfg.api_key.clone().into());
                 app.set_cfg_animate_avatar(cfg.animate_avatar);
                 app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
+                app.set_cfg_memory_enabled(cfg.memory_enabled);
                 app.set_cfg_system_context(cfg.system_context.clone().into());
                 app.set_settings_error("".into());
                 app.set_overlay("settings".into());
@@ -339,6 +363,7 @@ fn main() -> anyhow::Result<()> {
             };
             cfg.animate_avatar = app.get_cfg_animate_avatar();
             cfg.limit_wayland_scope = app.get_cfg_limit_wayland_scope();
+            cfg.memory_enabled = app.get_cfg_memory_enabled();
             cfg.system_context = app.get_cfg_system_context().trim().to_string();
             if cfg.system_context.chars().count() > chat_config::MAX_SYSTEM_CONTEXT_CHARS {
                 app.set_settings_error(app.get_tr().settings_context_invalid.clone());
@@ -388,6 +413,8 @@ fn main() -> anyhow::Result<()> {
                     app.invoke_finish_filesystem(app.get_fs_approved());
                 } else if app.get_overlay() == "command" {
                     app.invoke_command_decision(app.get_command_id(), false);
+                } else if app.get_overlay() == "memory" {
+                    app.set_overlay("settings".into());
                 } else {
                     app.set_overlay("none".into());
                 }

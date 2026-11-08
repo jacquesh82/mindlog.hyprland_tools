@@ -686,6 +686,27 @@ mod tests {
         assert!(prompt.contains("hello"));
     }
     #[test]
+    fn retrieved_context_reaches_cli_system_without_overriding_mandatory_rules() {
+        let dir = private_dir().unwrap();
+        let recall = "LOCAL RETRIEVED CONTEXT: user_choice PALETTE-MARKER #7BDACD";
+        let shared =
+            crate::agent::build_system_with_scope(crate::i18n::Lang::En, Some(recall), "", true);
+        let messages = vec![
+            Message::new_system_message(&shared),
+            Message::new_human_message("Reuse the Brave palette"),
+        ];
+        let (system, prompt, _, _) = prepare_prompt(&messages, &[], dir.path()).unwrap();
+        assert!(system.contains(recall));
+        assert!(!prompt.contains("PALETTE-MARKER"));
+        assert!(
+            system.find("COLOR TOOL PROTOCOL").unwrap() > system.find("PALETTE-MARKER").unwrap()
+        );
+        assert_eq!(
+            messages[0].content, shared,
+            "Le même message SYSTEM est transmis au transport Zcode"
+        );
+    }
+    #[test]
     fn cli_reply_requires_known_tool_and_object_arguments() {
         let tools = vec![FunctionDefinition::new(
             "hypr_status",

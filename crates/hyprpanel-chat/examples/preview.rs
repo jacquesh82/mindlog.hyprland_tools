@@ -147,6 +147,8 @@ fn main() -> anyhow::Result<()> {
                 app.invoke_finish_filesystem(app.get_fs_approved());
             } else if app.get_overlay() == "command" {
                 app.invoke_command_decision(app.get_command_id(), false);
+            } else if app.get_overlay() == "memory" {
+                app.set_overlay("settings".into());
             } else {
                 app.set_overlay("none".into());
             }
@@ -338,7 +340,8 @@ fn main() -> anyhow::Result<()> {
         !app.get_cfg_limit_wayland_scope(),
         "le périmètre doit pouvoir être désactivé au clavier"
     );
-    for _ in 0..2 {
+    // Mémoire -> effacer -> autorisation FS -> modèle.
+    for _ in 0..4 {
         app.window().dispatch_event(WindowEvent::KeyPressed {
             text: slint::platform::Key::Tab.into(),
         });
@@ -886,7 +889,8 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = weak.upgrade() {
             if app.get_overlay() == "command" && app.get_command_id() == id {
                 captured.borrow_mut().push((id, approved));
-                app.set_overlay("none".into());
+                app.set_overlay(app.get_command_return_overlay());
+                app.set_command_return_overlay("none".into());
             }
         }
     });
@@ -969,6 +973,21 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Le sélecteur d'abonnement fonctionne aussi sans souris.
+    app.set_command_id(6);
+    app.set_command_return_overlay("settings".into());
+    app.set_overlay("command".into());
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Escape.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Escape.into(),
+    });
+    assert_eq!(
+        app.get_overlay(),
+        "settings",
+        "refuser une requête d’inventaire doit revenir aux réglages"
+    );
+    app.invoke_close_overlay();
     messages.set_vec(Vec::new());
     app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
     app.set_draft("".into());
@@ -1073,7 +1092,11 @@ fn main() -> anyhow::Result<()> {
     // Variantes du formulaire : les clients natifs n'ont pas les champs Zcode
     // dont la largeur masquait auparavant le rétrécissement du formulaire.
     app.set_cfg_system_context("".into());
-    app.set_environment_text("{\n  \"os\": \"linux\",\n  \"username\": \"desktop-user\",\n  \"package_managers\": [\"pacman\", \"flatpak\"],\n  \"session\": {\"XDG_SESSION_TYPE\": \"wayland\"}\n}".into());
+    app.set_environment_text(serde_json::to_string_pretty(&serde_json::json!({
+        "schema":2,"os":"linux","username":"desktop-user", "package_managers":["pacman","flatpak"],
+        "desktop_tools":[{"name":"example-panel", "manager":"pacman", "version":"1.2.3-1", "version_source":"installed_package", "config_files":["~/.config/example-panel/config.toml"], "referenced_by":["~/.config/hypr/hyprland.conf"]}],
+        "inventory_sources":[{"manager":"pacman","status":"database_read","packages":1400}]
+    }))?.into());
     app.set_clients_claude_ok(true);
     app.set_clients_zcode_ok(true);
     for (name, provider, lang, approved, width, height) in [
@@ -1117,6 +1140,47 @@ fn main() -> anyhow::Result<()> {
             height,
         )?;
     }
+
+    app.set_overlay("none".into());
+    app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+    app.set_activity("tools".into());
+    app.set_busy(true);
+    app.set_task_label("Paquets installés (pacman) · 700/1400".into());
+    app.set_task_progress(0.5);
+    app.set_task_indeterminate(false);
+    snapshot(
+        &app,
+        &window,
+        &out.join("inventory-progress.png"),
+        1080,
+        800,
+    )?;
+    app.set_overlay("settings".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("inventory-progress-settings.png"),
+        480,
+        600,
+    )?;
+    app.set_busy(false);
+    app.set_task_label("".into());
+    app.set_overlay("memory".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("memory-confirmation.png"),
+        480,
+        600,
+    )?;
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Escape.into(),
+    });
+    assert_eq!(
+        app.get_overlay().as_str(),
+        "settings",
+        "Annuler l’effacement revient aux réglages"
+    );
 
     println!(
         "Captures écrites dans {} ; interactions vérifiées.",

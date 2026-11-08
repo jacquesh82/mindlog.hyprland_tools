@@ -60,11 +60,12 @@ impl Approvals {
                 return;
             };
             // Ne jamais remplacer une autre demande d'autorisation.
-            if app.get_overlay() != "none" {
+            if app.get_overlay() != "none" && app.get_overlay() != "settings" {
                 pending.answer(id, false);
                 return;
             }
             app.set_command_id(id);
+            app.set_command_return_overlay(app.get_overlay());
             app.set_command_text(details.into());
             app.set_command_reason(reason.into());
             app.set_activity("approval".into());
@@ -127,6 +128,23 @@ pub async fn run<F: Future<Output = bool>>(
     filesystem: &FilesystemAccess,
     confirmation: F,
 ) -> anyhow::Result<Value> {
+    run_with_limit(request, filesystem, confirmation, OUTPUT_LIMIT).await
+}
+
+pub async fn run_inventory<F: Future<Output = bool>>(
+    request: Request,
+    filesystem: &FilesystemAccess,
+    confirmation: F,
+) -> anyhow::Result<Value> {
+    run_with_limit(request, filesystem, confirmation, 32 * 1024 * 1024).await
+}
+
+async fn run_with_limit<F: Future<Output = bool>>(
+    request: Request,
+    filesystem: &FilesystemAccess,
+    confirmation: F,
+    output_limit: u64,
+) -> anyhow::Result<Value> {
     filesystem.require_approval()?;
     if !confirmation.await {
         return Ok(
@@ -163,7 +181,10 @@ pub async fn run<F: Future<Output = bool>>(
         .context("démarrage de la commande confirmée")?;
     #[cfg(unix)]
     let _group = ProcessGroup(child.id().context("pid enfant absent")?);
-    async fn capture<R: tokio::io::AsyncRead + Unpin>(reader: R) -> anyhow::Result<(String, bool)> {
+    async fn capture<R: tokio::io::AsyncRead + Unpin>(
+        reader: R,
+        limit: u64,
+    ) -> anyhow::Result<(String, bool)> {
         // Continuer à vider le pipe après la limite, sinon le processus se bloque.
         let mut reader = reader;
         let mut saved = Vec::new();
@@ -174,7 +195,7 @@ pub async fn run<F: Future<Output = bool>>(
             if count == 0 {
                 break;
             }
-            let keep = count.min((OUTPUT_LIMIT as usize).saturating_sub(saved.len()));
+            let keep = count.min((limit as usize).saturating_sub(saved.len()));
             saved.extend_from_slice(&buffer[..keep]);
             truncated |= keep < count;
         }
@@ -185,8 +206,8 @@ pub async fn run<F: Future<Output = bool>>(
     let outcome = tokio::time::timeout(Duration::from_secs(60), async {
         tokio::try_join!(
             async { Ok::<_, anyhow::Error>(child.wait().await?) },
-            capture(stdout),
-            capture(stderr)
+            capture(stdout, output_limit),
+            capture(stderr, OUTPUT_LIMIT)
         )
     })
     .await;
@@ -247,6 +268,10 @@ mod tests {
         );
         filesystem.set_approved(true);
         let result = run(Request::parse(&args).unwrap(), &filesystem, async { false })
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "declined");
+        let result = run_inventory(Request::parse(&args).unwrap(), &filesystem, async { false })
             .await
             .unwrap();
         assert_eq!(result["status"], "declined");
