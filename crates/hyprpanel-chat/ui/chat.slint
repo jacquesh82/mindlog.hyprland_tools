@@ -52,6 +52,8 @@ export struct TrTexts {
     settings-saved: string, settings-invalid: string,
     settings-motion: string,
     settings-context: string, settings-context-hint: string, settings-context-invalid: string,
+    fs-title: string, fs-body: string, fs-note: string, fs-allow: string, fs-refuse: string,
+    fs-granted: string, fs-denied: string, fs-request: string, fs-revoke: string,
     provider: string, subscription-hint: string,
     history-title: string, history-hint: string, history-empty: string,
     restore: string, restore-started: string, restore-done: string, restore-failed: string,
@@ -100,6 +102,21 @@ export component ChatWindow inherits Window {
     in-out property <string> settings-error;
     in-out property <bool> cfg-animate-avatar: true;
     in-out property <string> cfg-system-context;
+    in-out property <bool> fs-approved: false;
+    in-out property <string> fs-root: "~/.config";
+    private property <string> fs-return-overlay: "none";
+    callback filesystem-decision(bool);
+    public function request-filesystem() {
+        root.fs-return-overlay = root.overlay;
+        root.overlay = "filesystem";
+    }
+    public function finish-filesystem(approved: bool) {
+        root.fs-approved = approved;
+        if root.overlay == "filesystem" {
+            root.overlay = root.fs-return-overlay;
+            root.fs-return-overlay = "none";
+        }
+    }
     in-out property <bool> clients-claude-ok: false;
     in-out property <bool> clients-zcode-ok: false;
     in-out property <string> clients-claude-cmd: "";
@@ -640,7 +657,7 @@ export component ChatWindow inherits Window {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
                 width: min(root.view-width - 40px, 560px);
-                height: min(root.height - 60px, root.overlay == "settings" ? 740px : 560px);
+                height: min(root.height - 60px, root.overlay == "settings" ? 740px : root.overlay == "filesystem" ? 440px : 560px);
                 border-radius: 14px;
                 background: Theme.panel;
                 border-width: 1px;
@@ -654,6 +671,33 @@ export component ChatWindow inherits Window {
                 VerticalLayout {
                     padding: 24px;
                     spacing: 10px;
+
+                    if root.overlay == "filesystem": VerticalLayout {
+                        spacing: 16px;
+                        PanelHeader {
+                            title: root.tr.fs-title;
+                            close-label: root.tr.close;
+                            close => { root.close-overlay(); }
+                        }
+                        Text { text: root.tr.fs-body; color: Theme.text; font-size: 14px; wrap: word-wrap; }
+                        Rectangle {
+                            background: Theme.canvas;
+                            border-radius: 8px;
+                            height: fs-path.preferred-height + 24px;
+                            fs-path := Text {
+                                x: 12px; y: 12px; width: parent.width - 24px;
+                                text: root.fs-root; color: Theme.accent; font-size: 14px; wrap: word-wrap;
+                            }
+                        }
+                        Text { text: root.tr.fs-note; color: Theme.secondary; font-size: 13px; wrap: word-wrap; }
+                        Rectangle { vertical-stretch: 1; }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 12px;
+                            ActionButton { text: root.tr.fs-refuse; clicked => { root.filesystem-decision(false); } }
+                            ActionButton { text: root.tr.fs-allow; primary: true; clicked => { root.filesystem-decision(true); } }
+                        }
+                    }
 
                     // ── AIDE ──────────────────────────────────────────────
                     if root.overlay == "help": VerticalLayout {
@@ -727,6 +771,26 @@ export component ChatWindow inherits Window {
                                     CheckBox {
                                         text: root.tr.settings-motion;
                                         checked <=> root.cfg-animate-avatar;
+                                    }
+                                    HorizontalLayout {
+                                        height: 38px;
+                                        spacing: 12px;
+                                        Text {
+                                            text: root.fs-approved ? root.tr.fs-granted : root.tr.fs-denied;
+                                            color: Theme.secondary;
+                                            font-size: 13px;
+                                            wrap: word-wrap;
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        ActionButton {
+                                            text: root.fs-approved ? root.tr.fs-revoke : root.tr.fs-request;
+                                            filled: true;
+                                            clicked => {
+                                                if root.fs-approved { root.filesystem-decision(false); }
+                                                else { root.request-filesystem(); }
+                                            }
+                                        }
                                     }
                                     if root.provider-index != 0: Text {
                                         text: root.tr.subscription-hint;
@@ -892,6 +956,7 @@ export component ChatWindow inherits Window {
                                             }
                                             if rec.has-backup: ActionButton {
                                                 text: root.tr.restore;
+                                                enabled: root.fs-approved;
                                                 clicked => {
                                                     root.close-overlay();
                                                     root.restore-requested(rec.backup);

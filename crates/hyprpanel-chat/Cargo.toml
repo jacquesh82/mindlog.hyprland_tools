@@ -23,6 +23,7 @@ serde_json.workspace = true
 toml.workspace = true
 anyhow = "1"
 base64 = "0.22"
+sha2 = "0.11"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 langchain-rust = "8.0.0"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

@@ -6,6 +6,7 @@ mod agent;
 mod avatar;
 mod chat_config;
 mod choices;
+mod filesystem;
 mod i18n;
 mod mcp;
 mod providers;
@@ -56,6 +57,19 @@ fn main() -> anyhow::Result<()> {
 
     let (cfg, _) = chat_config::ChatConfig::load_or_init()
         .map_err(|e| anyhow::anyhow!("configuration du chat : {e}"))?;
+    let fs_backups = chat_config::state_history_path()
+        .parent()
+        .context("dossier de données")?
+        .join("file-backups");
+    let filesystem = std::sync::Arc::new(
+        filesystem::FilesystemAccess::new(filesystem::FilesystemAccess::default_root(), fs_backups)
+            .protect_directory(
+                chat_config::config_path()
+                    .parent()
+                    .context("dossier des réglages")?
+                    .to_path_buf(),
+            ),
+    );
 
     let app = ChatWindow::new().context("création de la fenêtre (session Wayland active ?)")?;
     avatar::install(&app);
@@ -64,6 +78,8 @@ fn main() -> anyhow::Result<()> {
     app.set_animations_enabled(cfg.animate_avatar);
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_tr(i18n::tr(cfg.lang()).to_slint());
+    app.set_fs_root(filesystem.root().to_string_lossy().to_string().into());
+    app.set_fs_approved(false);
     {
         let model: slint::ModelRc<MessageRow> =
             std::rc::Rc::new(slint::VecModel::<MessageRow>::from(Vec::new())).into();
@@ -94,6 +110,26 @@ fn main() -> anyhow::Result<()> {
     // UI → agent : canal non borné ; l'agent tourne dans un runtime tokio
     // hébergé par un thread dédié, la boucle d'événements Slint garde le main.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<agent::UserEvent>();
+    {
+        let fs = filesystem.clone();
+        let tx_fs = tx.clone();
+        let weak = app.as_weak();
+        app.on_filesystem_decision(move |approved| {
+            fs.set_approved(approved);
+            if let Some(app) = weak.upgrade() {
+                app.invoke_finish_filesystem(approved);
+                app.set_status(if approved {
+                    app.get_tr().fs_granted
+                } else {
+                    app.get_tr().fs_denied
+                });
+                if app.get_overlay() == "none" {
+                    app.invoke_focus_composer();
+                }
+            }
+            let _ = tx_fs.send(agent::UserEvent::FilesystemChanged);
+        });
+    }
     {
         let tx_send = tx.clone();
         let tx_reset = tx.clone();
@@ -283,8 +319,14 @@ fn main() -> anyhow::Result<()> {
         let weak_close = app.as_weak();
         app.on_close_overlay(move || {
             if let Some(app) = weak_close.upgrade() {
-                app.set_overlay("none".into());
-                app.invoke_focus_composer();
+                if app.get_overlay() == "filesystem" {
+                    app.invoke_finish_filesystem(app.get_fs_approved());
+                } else {
+                    app.set_overlay("none".into());
+                }
+                if app.get_overlay() == "none" {
+                    app.invoke_focus_composer();
+                }
             }
         });
 
@@ -349,10 +391,11 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
-            runtime.block_on(agent::run(cfg, rx, weak));
+            runtime.block_on(agent::run(cfg, rx, weak, filesystem));
         })
         .context("thread agent")?;
 
+    app.invoke_request_filesystem();
     app.run().context("boucle d'événements Slint")?;
     Ok(())
 }

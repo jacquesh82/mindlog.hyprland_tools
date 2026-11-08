@@ -7,6 +7,7 @@
 //! `AgentExecutor` génériques n'exposent ni l'un ni l'autre.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
@@ -35,6 +36,7 @@ pub enum UserEvent {
     ConfigUpdated(Box<ChatConfig>),
     Restore(String),
     Choice { display: String, context: String },
+    FilesystemChanged,
 }
 
 const MAX_ROUNDS: usize = 12;
@@ -210,7 +212,12 @@ fn parse_backup_name(response: &str) -> Option<String> {
 // Boucle principale
 // ---------------------------------------------------------------------------
 
-pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: Weak<ChatWindow>) {
+pub async fn run(
+    cfg: ChatConfig,
+    mut rx: UnboundedReceiver<UserEvent>,
+    weak: Weak<ChatWindow>,
+    filesystem: Arc<crate::filesystem::FilesystemAccess>,
+) {
     let mut cfg = cfg;
     let mut translations = tr(cfg.lang());
 
@@ -227,7 +234,14 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
         Ok(url) => match McpSession::connect(&url).await {
             Ok(session) => {
                 let n = session.tools().len();
-                ui::set_status(&weak, translations.mcp_tools.replace("{}", &n.to_string()));
+                ui::set_status(
+                    &weak,
+                    if filesystem.approved() {
+                        translations.mcp_tools.replace("{}", &n.to_string())
+                    } else {
+                        translations.fs_denied.clone()
+                    },
+                );
                 Some(session)
             }
             Err(e) => {
@@ -250,29 +264,10 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
             None
         }
     };
-    let mut functions: Vec<FunctionDefinition> = mcp
-        .as_ref()
-        .map(|m| {
-            m.tools()
-                .iter()
-                .map(|t| {
-                    FunctionDefinition::new(
-                        &t.name,
-                        t.description.as_deref().unwrap_or(""),
-                        Value::Object(t.input_schema.as_ref().clone()),
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    functions.extend(crate::choices::tool_definitions());
+    let mut functions = available_functions(mcp.as_ref(), &filesystem);
 
     let mut llm = build_llm(&cfg, &functions);
-    let mut system = build_system(
-        cfg.lang(),
-        mcp.as_ref().and_then(|m| m.instructions()).as_deref(),
-        &cfg.system_context,
-    );
+    let mut system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
     let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
     let mut ledger = Ledger::load(crate::chat_config::state_history_path());
@@ -290,6 +285,15 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
             event => (event, None),
         };
         match event {
+            UserEvent::FilesystemChanged => {
+                functions = available_functions(mcp.as_ref(), &filesystem);
+                llm = build_llm(&cfg, &functions);
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
+                convo[0] = Message::new_system_message(system.clone());
+                if !filesystem.approved() {
+                    convo.truncate(1);
+                }
+            }
             UserEvent::Choice { .. } => unreachable!("choix normalisé en message utilisateur"),
             UserEvent::Reset => {
                 convo = vec![Message::new_system_message(system.clone())];
@@ -300,11 +304,7 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 cfg = *new_cfg;
                 translations = tr(cfg.lang());
                 ui::set_tr(&weak, translations.to_slint());
-                system = build_system(
-                    cfg.lang(),
-                    mcp.as_ref().and_then(|m| m.instructions()).as_deref(),
-                    &cfg.system_context,
-                );
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
                 convo[0] = Message::new_system_message(system.clone());
                 llm = build_llm(&cfg, &functions);
                 ui::set_status(&weak, &translations.settings_saved);
@@ -318,11 +318,9 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 }
                 ui::append(&weak, "user", bubble.trim());
                 ui::set_activity(&weak, "tools");
-
-                // Registre + backup AVANT le tour : restaurable depuis ⟲.
                 let turn = ledger.next_turn();
                 let preview: String = visible_text.chars().take(60).collect();
-                let backup = match mcp.as_ref() {
+                let backup = match mcp.as_ref().filter(|_| filesystem.approved()) {
                     Some(m) => {
                         let mut args = Map::new();
                         args.insert("label".into(), json!(format!("lyra-turn-{turn:03}")));
@@ -337,10 +335,9 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                     turn,
                     timestamp: timefmt::iso(std::time::SystemTime::now()),
                     preview,
-                    backup: backup.clone(),
+                    backup,
                 });
                 ui::history_set(&weak, &ledger.records);
-
                 ui::set_busy(&weak, true);
                 if let Err(e) = run_turn(
                     &cfg,
@@ -352,6 +349,7 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                     &files,
                     &translations,
                     &weak,
+                    &filesystem,
                 )
                 .await
                 {
@@ -360,20 +358,28 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 ui::set_busy(&weak, false);
                 ui::set_status(
                     &weak,
-                    match &mcp {
-                        Some(m) => translations
-                            .mcp_tools
-                            .replace("{}", &m.tools().len().to_string()),
-                        None => translations.mcp_unavailable.clone(),
+                    if !filesystem.approved() {
+                        translations.fs_denied.clone()
+                    } else {
+                        match &mcp {
+                            Some(m) => translations
+                                .mcp_tools
+                                .replace("{}", &m.tools().len().to_string()),
+                            None => translations.mcp_unavailable.clone(),
+                        }
                     },
                 );
             }
             UserEvent::Restore(name) => {
+                if !filesystem.approved() {
+                    ui::append(&weak, "error", &translations.fs_denied);
+                    continue;
+                }
                 ui::set_activity(&weak, "restore");
                 ui::set_busy(&weak, true);
                 ui::append(&weak, "status", &translations.restore_started);
                 let Some(mcp) = mcp.as_ref() else {
-                    ui::append(&weak, "error", translations.mcp_unavailable.clone());
+                    ui::append(&weak, "error", &translations.mcp_unavailable);
                     ui::set_busy(&weak, false);
                     continue;
                 };
@@ -395,11 +401,63 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                             format!("{} : {e:#}", translations.restore_failed),
                         );
                     }
-                }
+                };
                 ui::set_busy(&weak, false);
             }
         }
     }
+}
+
+fn available_functions(
+    mcp: Option<&McpSession>,
+    filesystem: &crate::filesystem::FilesystemAccess,
+) -> Vec<FunctionDefinition> {
+    let mut functions: Vec<FunctionDefinition> = mcp
+        .as_ref()
+        .map(|m| {
+            m.tools()
+                .iter()
+                .filter(|t| filesystem.allows_mcp(&t.name))
+                .map(|t| {
+                    FunctionDefinition::new(
+                        &t.name,
+                        t.description.as_deref().unwrap_or(""),
+                        Value::Object(t.input_schema.as_ref().clone()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    functions.extend(crate::choices::tool_definitions());
+    functions.extend(filesystem.tool_definitions());
+    functions
+}
+
+fn runtime_system(
+    cfg: &ChatConfig,
+    mcp: Option<&McpSession>,
+    filesystem: &crate::filesystem::FilesystemAccess,
+) -> String {
+    let mut instructions = mcp.and_then(|m| m.instructions()).unwrap_or_default();
+    let directory = if filesystem.approved() {
+        filesystem.root().display().to_string()
+    } else {
+        "~/.config".into()
+    };
+    instructions.push_str(&format!(
+        "\n\nFILESYSTEM PERMISSION: {}. Configuration directory: {directory}. ",
+        if filesystem.approved() {
+            "GRANTED for this session"
+        } else {
+            "NOT GRANTED"
+        }
+    ));
+    instructions.push_str(if filesystem.approved() {
+        "Use lyra_list_directory, lyra_read_file and lyra_write_file to work with configuration files. Never claim an edit succeeded without its tool result. Only write when the user has requested that change. Private LYRA files and generated files remain protected. Raw Lua and arbitrary dispatch tools are unavailable."
+    } else {
+        "No filesystem or desktop tools are authorized. Do not read, back up or modify local configuration through another mechanism. Ask the user to open Settings and allow filesystem access when needed. Explicitly attached files can still be discussed."
+    });
+    build_system(cfg.lang(), Some(&instructions), &cfg.system_context)
 }
 
 fn build_llm(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> Claude {
@@ -461,6 +519,7 @@ async fn run_turn(
     files: &[PathBuf],
     translations: &Tr,
     weak: &Weak<ChatWindow>,
+    filesystem: &crate::filesystem::FilesystemAccess,
 ) -> anyhow::Result<()> {
     cfg.validate_subscription().map_err(anyhow::Error::msg)?;
     let (message, notes) = build_user_message(user_text, files, &|p| std::fs::read(p));
@@ -522,7 +581,7 @@ async fn run_turn(
             let out = if awaiting_choice {
                 json!({"status": "deferred", "reason": "awaiting_user_choice"}).to_string()
             } else if tc.name == crate::choices::OFFER_TOOL {
-                match crate::choices::ChoiceRequest::parse(&tc.arguments) {
+                match authorized_choices(&tc.arguments, filesystem) {
                     Ok(request) => {
                         ui::offer_choices(weak, request);
                         awaiting_choice = true;
@@ -541,6 +600,14 @@ async fn run_turn(
                 ui::set_row(weak, row, "tool", &details);
                 let out = if tc.name == crate::choices::PALETTE_TOOL {
                     crate::choices::palette_catalog().to_string()
+                } else if crate::filesystem::FilesystemAccess::is_tool(&tc.name) {
+                    let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+                    match filesystem.call(&tc.name, &args) {
+                        Ok(value) => value.to_string(),
+                        Err(error) => json!({"error":error.to_string()}).to_string(),
+                    }
+                } else if !filesystem.allows_mcp(&tc.name) {
+                    json!({"error":"Filesystem/desktop access is not authorized, or this raw tool is unavailable. Ask the user to review permissions in Settings."}).to_string()
                 } else if let Some(session) = session {
                     let args = parse_tool_arguments(&tc.arguments);
                     let call = session.call(&tc.name, args);
@@ -565,6 +632,22 @@ async fn run_turn(
         }
     }
     Ok(())
+}
+
+fn authorized_choices(
+    raw: &str,
+    filesystem: &crate::filesystem::FilesystemAccess,
+) -> anyhow::Result<crate::choices::ChoiceRequest> {
+    anyhow::ensure!(raw.len() <= 600_000, "proposition trop volumineuse");
+    let request: crate::choices::ChoiceRequest =
+        serde_json::from_str(raw).context("proposition mal formée")?;
+    for option in &request.options {
+        if let Some(path) = &option.image_path {
+            filesystem.check_preview(path)?;
+        }
+    }
+    request.validate()?;
+    Ok(request)
 }
 
 /// Consomme le flux d'événements LangChain : streame le texte dans la bulle
@@ -678,6 +761,33 @@ pub fn truncate_str(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn denied_access_keeps_pure_choices_but_never_probes_local_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = crate::filesystem::FilesystemAccess::new(
+            dir.path().join("missing-config"),
+            dir.path().join("backups"),
+        );
+        assert_eq!(available_functions(None, &fs).len(), 2);
+        let images = json!({"question":"Choose","options":[
+            {"id":"a","label":"A","image_path":"/missing-private-file.png"},
+            {"id":"b","label":"B"}
+        ]})
+        .to_string();
+        let error = authorized_choices(&images, &fs).unwrap_err().to_string();
+        assert!(
+            error.contains("non autorisé"),
+            "l'autorisation doit précéder tout accès ou test de chemin"
+        );
+        let colors = json!({"question":"Choose","options":[
+            {"id":"a","label":"A","colors":["#112233"]}, {"id":"b","label":"B"}
+        ]})
+        .to_string();
+        assert!(authorized_choices(&colors, &fs).is_ok());
+        fs.set_approved(true);
+        assert_eq!(available_functions(None, &fs).len(), 5);
+    }
 
     #[test]
     fn system_context_replaces_role_and_retains_tool_instructions() {

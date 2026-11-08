@@ -25,7 +25,8 @@ Default locations, adjusted when the corresponding XDG variables are set:
 | --- | --- |
 | `~/.config/hyprpanel/chat.toml` | Provider, models, SYSTEM context, language, animation, and GLM Coding Plan key |
 | `~/.config/hyprpanel/config.toml` | Service port, token, and paths |
-| `~/.local/state/hyprpanel/backups/` | Configuration backups |
+| `~/.local/state/hyprpanel/backups/` | Hyprland configuration backups |
+| `~/.local/state/hyprpanel/file-backups/` | Previous contents saved before file-tool replacements |
 | `~/.local/state/hyprpanel/lyra-history.json` | Backup records associated with chat turns |
 | `~/.cache/hyprpanel/screenshots/` | Screenshots |
 
@@ -36,6 +37,45 @@ without running the installer:
 hyprpanel init
 hyprpanel-chat init
 ```
+
+### Filesystem approval
+
+Each application session starts without assistant filesystem permission. A
+native dialog asks whether to allow reading and editing configurations under
+`~/.config`. Closing or declining the dialog does not grant access. Settings
+lets the user grant or revoke access later; provider switching does not grant it.
+
+Before approval, LYRA exposes only text/color/SVG choices and the static palette
+catalog. It blocks assistant file/desktop tool calls, automatic Hyprland backups,
+restoration, and model-proposed local image previews. Files explicitly selected
+and sent by the user are separately authorized attachments.
+
+After approval, all three providers use the same local file tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `lyra_list_directory` | List up to 200 entries inside the approved configuration directory |
+| `lyra_read_file` | Read a UTF-8 configuration file up to 64 KiB and return its SHA-256 |
+| `lyra_write_file` | Replace a file using its current SHA-256, or create a new file with `expected_sha256: "new"` in an existing directory |
+
+Paths are checked against the canonical approved root. Parent traversal and
+symlinks escaping that directory are rejected. LYRA’s private configuration
+directory is excluded, including aliases. Generated `monitors.lua` and
+`inputs.lua` files stay read-only. Replacements preserve file permissions and
+save the previous content under `file-backups` before an atomic write.
+
+The generic `hypr_eval` and `hypr_dispatch` tools are not exposed or accepted by
+LYRA: raw Lua or arbitrary commands could bypass the file-tool restrictions.
+Specialized Hyprland tools require approval. The independent MCP service still
+exposes its original tools to clients registered separately.
+
+This is an assistant tool permission, not an OS sandbox. The application still
+loads its own settings, history, assets, and provider login state. Approved MCP
+backups and screenshots use LYRA’s managed data/cache directories outside
+`~/.config`. Revoking access clears the model conversation for future requests;
+the visible chat remains, and previously transmitted data is not recalled from
+the provider. Local file/image contents may be sent to the selected provider,
+as stated in the approval dialog.
 
 ### SYSTEM context
 

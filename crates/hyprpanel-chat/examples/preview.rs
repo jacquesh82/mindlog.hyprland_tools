@@ -128,8 +128,14 @@ fn main() -> anyhow::Result<()> {
     let weak = app.as_weak();
     app.on_close_overlay(move || {
         if let Some(app) = weak.upgrade() {
-            app.set_overlay("none".into());
-            app.invoke_focus_composer();
+            if app.get_overlay() == "filesystem" {
+                app.invoke_finish_filesystem(app.get_fs_approved());
+            } else {
+                app.set_overlay("none".into());
+            }
+            if app.get_overlay() == "none" {
+                app.invoke_focus_composer();
+            }
         }
     });
     let weak = app.as_weak();
@@ -287,7 +293,7 @@ fn main() -> anyhow::Result<()> {
     app.set_busy(false);
     app.set_overlay("settings".into());
     snapshot(&app, &window, &out.join("settings.png"), 1080, 800)?;
-    click(&app, 540., 600.);
+    click(&app, 540., 90.);
     assert_eq!(
         app.get_overlay().as_str(),
         "settings",
@@ -299,7 +305,7 @@ fn main() -> anyhow::Result<()> {
         !app.get_cfg_animate_avatar(),
         "la préférence d’animation doit être modifiable"
     );
-    click(&app, 450., 232.);
+    click(&app, 450., 278.);
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
     });
@@ -754,6 +760,82 @@ fn main() -> anyhow::Result<()> {
         2,
         "les options doivent être activables au clavier"
     );
+
+    // Consentement FS : refus et fermeture restent fermés, seule une action
+    // explicite autorise, et la révocation ne ferme pas les réglages.
+    app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+    app.set_busy(false);
+    app.set_overlay("none".into());
+    app.set_fs_approved(false);
+    let decisions = Rc::new(RefCell::new(Vec::new()));
+    let captured = decisions.clone();
+    let weak_fs = app.as_weak();
+    app.on_filesystem_decision(move |approved| {
+        captured.borrow_mut().push(approved);
+        if let Some(app) = weak_fs.upgrade() {
+            app.invoke_finish_filesystem(approved);
+        }
+    });
+    app.invoke_request_filesystem();
+    snapshot(
+        &app,
+        &window,
+        &out.join("filesystem-consent.png"),
+        1080,
+        800,
+    )?;
+    assert!(!app.get_fs_approved());
+    click(&app, 625., 577.);
+    assert_eq!(
+        &*decisions.borrow(),
+        &[false],
+        "refuser ne doit pas autoriser l'accès"
+    );
+    assert!(!app.get_fs_approved());
+    assert_eq!(app.get_overlay(), "none");
+    app.invoke_request_filesystem();
+    snapshot(
+        &app,
+        &window,
+        &out.join("filesystem-consent.png"),
+        1080,
+        800,
+    )?;
+    click(&app, 735., 577.);
+    assert_eq!(
+        &*decisions.borrow(),
+        &[false, true],
+        "autorisation explicite par le bouton"
+    );
+    assert!(app.get_fs_approved());
+    app.set_overlay("settings".into());
+    app.invoke_filesystem_decision(false);
+    assert!(!app.get_fs_approved());
+    assert_eq!(
+        app.get_overlay(),
+        "settings",
+        "la révocation conserve le panneau"
+    );
+    app.invoke_request_filesystem();
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Escape.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Escape.into(),
+    });
+    assert_eq!(app.get_overlay(), "settings");
+    assert!(!app.get_fs_approved(), "fermer sans choisir n'accorde rien");
+    app.set_overlay("none".into());
+    app.set_tr(i18n::tr(i18n::Lang::En).to_slint());
+    app.invoke_request_filesystem();
+    snapshot(
+        &app,
+        &window,
+        &out.join("filesystem-consent-compact.png"),
+        480,
+        600,
+    )?;
+    app.invoke_close_overlay();
 
     // Le sélecteur d'abonnement fonctionne aussi sans souris.
     messages.set_vec(Vec::new());

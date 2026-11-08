@@ -86,6 +86,16 @@ pub struct Tr {
     pub settings_context: String,
     pub settings_context_hint: String,
     pub settings_context_invalid: String,
+    pub fs_title: String,
+    pub fs_body: String,
+    pub fs_note: String,
+    pub fs_allow: String,
+    pub fs_refuse: String,
+    pub fs_granted: String,
+    pub fs_denied: String,
+    pub fs_request: String,
+    pub fs_revoke: String,
+
     pub provider: String,
     pub subscription_hint: String,
     // historique
@@ -128,7 +138,9 @@ LYRA configure votre interface Hyprland en discutant.
 WORKFLOW — elle procède toujours ainsi :
 1. Test à chaud (hypr_set_option_live) : le réglage s'applique immédiatement, sans toucher aux fichiers — parfait pour essayer.
 2. Si vous validez : elle édite ~/.config/hypr/hyprland.lua et recharge (hypr_reload), puis vérifie les erreurs (hypr_config_errors).
-3. Avant CHAQUE message, une sauvegarde de la config est créée : le panneau ⟲ permet de restaurer l'état d'avant n'importe quel prompt.
+3. Après autorisation d’accès aux fichiers, une sauvegarde de la config est demandée avant chaque message : le panneau ⟲ permet de restaurer les sauvegardes disponibles.
+
+ACCÈS AUX FICHIERS — LYRA demande votre accord pour consulter et modifier ~/.config. Refuser ou fermer la demande laisse l’accès désactivé. L’accord vaut pour la session et peut être retiré dans les réglages.
 
 CE QU'ELLE SAIT FAIRE
 • Lire l'état : écrans, espaces de travail, fenêtres, périphériques, raccourcis, options.
@@ -149,7 +161,9 @@ LYRA configures your Hyprland desktop through conversation.
 WORKFLOW — she always proceeds like this:
 1. Hot test (hypr_set_option_live): the setting applies immediately, no files touched — perfect for trying things out.
 2. Once you approve: she edits ~/.config/hypr/hyprland.lua and reloads (hypr_reload), then checks for errors (hypr_config_errors).
-3. Before EVERY message, a config snapshot is created: the ⟲ panel restores the state from before any prompt.
+3. After filesystem approval, a config snapshot is requested before each message: the ⟲ panel restores available snapshots.
+
+FILESYSTEM ACCESS — LYRA asks permission to read and edit ~/.config. Declining or closing the request leaves access disabled. Approval lasts for the session and can be revoked in Settings.
 
 WHAT SHE CAN DO
 • Read state: monitors, workspaces, windows, devices, keybindings, options.
@@ -206,7 +220,7 @@ fn french() -> Tr {
         card_capture: "Votre bureau".into(),
         welcome_title: "Bonjour, je suis LYRA.".into(),
         welcome_l1: "Un bureau qui vous ressemble. Décrivez vos envies, je m’occupe des réglages.".into(),
-        welcome_l2: "Des essais réversibles. Une sauvegarde avant chaque échange.".into(),
+        welcome_l2: "Des essais réversibles. L’accès à vos fichiers reste votre choix.".into(),
         welcome_l3: "Vous pouvez joindre des images et des fichiers texte avec « Joindre ».".into(),
         welcome_examples: "Un point de départ pour votre prochaine idée".into(),
         ex1: "Montre l'état de mes écrans".into(),
@@ -232,6 +246,16 @@ fn french() -> Tr {
         settings_context: "Contexte SYSTEM".into(),
         settings_context_hint: "Instructions communes aux trois fournisseurs. Laissez vide pour le rôle LYRA par défaut ; votre texte le remplace. Le périmètre Hyprland/Wayland et les consignes des outils restent appliqués. 16 000 caractères maximum.".into(),
         settings_context_invalid: "Le contexte SYSTEM doit contenir au maximum 16 000 caractères.".into(),
+        fs_title: "Autoriser l’accès aux fichiers ?".into(),
+        fs_body: "Autorisez-vous l’assistant LYRA à consulter et modifier vos fichiers de configuration ? Leur contenu peut être transmis au fournisseur sélectionné pour traiter vos demandes.".into(),
+        fs_note: "Les fichiers privés de LYRA et les configurations générées restent protégés. Sauvegardes et captures utilisent les dossiers de données de LYRA. Cette autorisation vaut pour la session et peut être retirée dans les réglages. Le retrait remet à zéro le contexte du modèle. Les fichiers joints explicitement restent utilisables si vous refusez.".into(),
+        fs_allow: "Autoriser l’accès".into(),
+        fs_refuse: "Refuser".into(),
+        fs_granted: "FS : accès autorisé".into(),
+        fs_denied: "FS : accès non autorisé".into(),
+        fs_request: "Autoriser l’accès aux fichiers…".into(),
+        fs_revoke: "Retirer l’accès aux fichiers".into(),
+
         provider: "Abonnement utilisé".into(),
         subscription_hint: "Utilise la session connectée du client officiel. Modèle vide = modèle par défaut de l’abonnement. Connexion : claude auth login / codex login.".into(),
         history_title: "Historique de configuration".into(),
@@ -283,7 +307,7 @@ fn english() -> Tr {
         card_capture: "Your desktop".into(),
         welcome_title: "Hi, I'm LYRA.".into(),
         welcome_l1: "A desktop that feels like you. Tell me what you have in mind, I’ll handle the settings.".into(),
-        welcome_l2: "Reversible changes. A backup before every exchange.".into(),
+        welcome_l2: "Reversible changes. File access stays your choice.".into(),
         welcome_l3: "You can attach images and text files with “Attach”.".into(),
         welcome_examples: "A starting point for your next idea".into(),
         ex1: "Show my monitors".into(),
@@ -309,6 +333,16 @@ fn english() -> Tr {
         settings_context: "SYSTEM context".into(),
         settings_context_hint: "Instructions shared by all three providers. Leave empty for LYRA’s default role; your text replaces it. Hyprland/Wayland scope and tool instructions still apply. Maximum 16,000 characters.".into(),
         settings_context_invalid: "The SYSTEM context must not exceed 16,000 characters.".into(),
+        fs_title: "Allow filesystem access?".into(),
+        fs_body: "Allow the LYRA assistant to read and edit your configuration files? Their contents may be sent to the selected provider to handle your requests.".into(),
+        fs_note: "LYRA’s private files and generated configurations stay protected. Backups and screenshots use LYRA’s data directories. Access lasts for this session and can be revoked in Settings. Revocation resets the model’s conversation context. Explicitly attached files remain available if you decline.".into(),
+        fs_allow: "Allow access".into(),
+        fs_refuse: "Decline".into(),
+        fs_granted: "FS: access allowed".into(),
+        fs_denied: "FS: access not allowed".into(),
+        fs_request: "Allow filesystem access…".into(),
+        fs_revoke: "Revoke filesystem access".into(),
+
         provider: "Active subscription".into(),
         subscription_hint: "Uses the signed-in session of the official client. Empty model = subscription default. Sign in: claude auth login / codex login.".into(),
         history_title: "Configuration history".into(),
@@ -387,6 +421,16 @@ impl Tr {
             settings_context: self.settings_context.clone().into(),
             settings_context_hint: self.settings_context_hint.clone().into(),
             settings_context_invalid: self.settings_context_invalid.clone().into(),
+            fs_title: self.fs_title.clone().into(),
+            fs_body: self.fs_body.clone().into(),
+            fs_note: self.fs_note.clone().into(),
+            fs_allow: self.fs_allow.clone().into(),
+            fs_refuse: self.fs_refuse.clone().into(),
+            fs_granted: self.fs_granted.clone().into(),
+            fs_denied: self.fs_denied.clone().into(),
+            fs_request: self.fs_request.clone().into(),
+            fs_revoke: self.fs_revoke.clone().into(),
+
             provider: self.provider.clone().into(),
             subscription_hint: self.subscription_hint.clone().into(),
             history_title: self.history_title.clone().into(),

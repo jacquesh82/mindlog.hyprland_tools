@@ -52,6 +52,16 @@ and you can switch between messages.
 All three modes use the subscription connection and stream their text into the
 chat. LYRA does not automatically fall back to a pay-as-you-go API.
 
+## Filesystem permission
+
+At launch, LYRA asks before giving the assistant read/write access to
+**`~/.config`**. Choose **Allow access** or **Decline**. Access lasts for the
+session and can be revoked in Settings. File contents may be shared with the
+selected provider when needed for your requests.
+
+Without approval, assistant file/desktop tools and automatic configuration
+backups stay disabled. Explicitly attached files remain available.
+
 ## Settings and backups
 
 - **⚙ Settings**: choose English or French, a model, and whether the avatar animates.
@@ -59,7 +69,7 @@ chat. LYRA does not automatically fall back to a pay-as-you-go API.
 - **⟲ History**: browse saved configurations and restore a backup.
 - **Tool details**: expand the link in the chat to inspect the operations performed.
 
-Live settings let you try changes. LYRA requests a configuration backup before
+Live settings let you try changes. Once filesystem access is approved, LYRA requests a configuration backup before
 each message. The conversation lasts for the current window session; configuration
 backups remain available after you close it.
 
