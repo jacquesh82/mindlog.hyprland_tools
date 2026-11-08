@@ -1,22 +1,30 @@
 # LYRA
 
-**Configure your Hyprland desktop through conversation.**
+**Manage your Linux desktop through conversation.**
 
-LYRA is a native chat app for exploring your setup, trying desktop settings,
-and choosing a look that suits you. It works with your existing **Zcode,
-Claude Code, or Codex subscription**.
+LYRA is a native assistant for **Linux desktop operations**: exploring your
+environment, finding installed applications and their configurations,
+troubleshooting desktop issues, and personalizing your workspace. It works with
+your existing **Zcode, Claude Code, or Codex subscription**.
 
-By default, LYRA focuses on **Hyprland, Wayland, desktop applications, browsers,
-and themes**. Turn off **Settings → Limit actions to the Wayland desktop** to
-allow general requests. Command confirmations and filesystem permissions still apply.
+Work with applications, browsers, themes, configuration files, and package tools
+through conversation, with local context and explicit approval before commands.
+The built-in compositor integration currently targets **Hyprland on Wayland**.
+
+The default scope covers Wayland and its desktop applications, browsers, and
+themes. Turn off **Settings → Limit actions to the Wayland desktop** to allow
+broader Linux tasks and general requests. Command confirmations and filesystem
+permissions still apply.
 
 ![LYRA interface with desktop suggestions, chat, and subscription selector](docs/images/lyra.png)
 
 ## What you can ask
 
-- “Show my monitor setup and keyboard shortcuts.”
-- “Try setting the gaps to 10, then put them back.”
+- “Find my installed desktop tools, their versions, and configuration files.”
+- “Help me troubleshoot this application's configuration.”
+- “Create an unpacked browser theme using my chosen colors.”
 - “Suggest three color palettes and let me choose.”
+- “On Hyprland, show my monitor setup and try setting the gaps to 10.”
 
 Click LYRA’s suggestions to choose text, colors, images, or diagrams.
 Use **Attach** to send images and text files along with your message.
@@ -32,9 +40,13 @@ computed WCAG contrast, corrections for failing BG/FG pairs, and checks across s
 
 ## Install from source
 
-You need **Linux with Hyprland, Git, Rust/Cargo, and systemd**.
-The project has been tested with **Hyprland 0.57.1 and its Lua configuration**.
-Install `grim` for screenshots and `zenity` for file attachments.
+You need **Linux, Git, and Rust/Cargo**. The bundled installer uses
+**systemd user services** for the local integration service.
+
+Native compositor controls require **Hyprland on Wayland**; this integration has
+been tested with **Hyprland 0.57.1 and its Lua configuration**. Install `grim` for
+Wayland screenshots and `zenity` for file attachments. Image paste uses the
+Wayland clipboard.
 
 ```bash
 git clone https://github.com/jacquesh82/mindlog.hyprland_tools.git
@@ -44,7 +56,7 @@ cd mindlog.hyprland_tools
 ```
 
 The installer builds the application, installs both binaries in `~/.local/bin`,
-and starts the local service that communicates with your desktop.
+and starts the local Hyprland integration service.
 
 ## Choose your subscription
 
