@@ -2,13 +2,14 @@
 //! exécution des outils via le client MCP, mise à jour de l'UI en direct.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
+use base64::Engine as _;
 use futures_util::StreamExt;
 use serde_json::{json, Map, Value};
 use slint::Weak;
-
 
 use crate::chat_config::ChatConfig;
 use crate::mcp::{self, McpSession};
@@ -17,13 +18,127 @@ use crate::ChatWindow;
 
 /// Événements envoyés par l'UI vers la boucle agent.
 pub enum UserEvent {
-    Text(String),
+    Input { text: String, files: Vec<PathBuf> },
     Reset,
 }
 
 const MAX_ROUNDS: usize = 12;
 const TIMEOUT_LLM: Duration = Duration::from_secs(180);
 const TIMEOUT_TOOL: Duration = Duration::from_secs(30);
+/// Tailles max des pièces jointes.
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_TEXT_BYTES: u64 = 64 * 1024;
+
+// ---------------------------------------------------------------------------
+// Pièces jointes (classification et blocs Anthropic, purs et testés)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    Image(&'static str), // media_type Anthropic
+    Text,
+    Unsupported,
+}
+
+pub fn classify_attachment(path: &Path) -> AttachmentKind {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => AttachmentKind::Image("image/png"),
+        "jpg" | "jpeg" => AttachmentKind::Image("image/jpeg"),
+        "webp" => AttachmentKind::Image("image/webp"),
+        "gif" => AttachmentKind::Image("image/gif"),
+        "txt" | "md" | "lua" | "conf" | "toml" | "json" | "yaml" | "yml" | "ini" | "rs" | "py"
+        | "sh" | "bash" | "css" | "html" | "xml" | "csv" | "log" | "service" | "slint" => {
+            AttachmentKind::Text
+        }
+        _ => AttachmentKind::Unsupported,
+    }
+}
+
+/// Libellé lisible d'une pièce (chip, bulle).
+pub fn attachment_meta(path: &Path) -> String {
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let kind = match classify_attachment(path) {
+        AttachmentKind::Image(_) => "image",
+        AttachmentKind::Text => "texte",
+        AttachmentKind::Unsupported => "non pris en charge",
+    };
+    format!("{} · {}", human_size(size), kind)
+}
+
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} Mo", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.0} Ko", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} o")
+    }
+}
+
+/// Construit les blocs de contenu Anthropic d'un message utilisateur avec
+/// pièces jointes. `read` est injecté pour les tests.
+fn build_user_content(
+    text: &str,
+    files: &[PathBuf],
+    read: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
+) -> (Vec<Value>, Vec<String>) {
+    let mut blocks = Vec::new();
+    let mut notes = Vec::new();
+
+    if !text.trim().is_empty() {
+        blocks.push(json!({"type": "text", "text": text}));
+    }
+
+    for file in files {
+        let name = file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| file.to_string_lossy().into_owned());
+        match classify_attachment(file) {
+            AttachmentKind::Image(media_type) => {
+                match read(file) {
+                    Ok(bytes) if bytes.len() as u64 <= MAX_IMAGE_BYTES => {
+                        blocks.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                            }
+                        }));
+                    }
+                    Ok(_) => notes.push(format!("📎 {name} : image trop volumineuse (> 5 Mo), non transmise")),
+                    Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
+                }
+            }
+            AttachmentKind::Text => match read(file) {
+                Ok(bytes) if bytes.len() as u64 <= MAX_TEXT_BYTES => {
+                    let content = String::from_utf8_lossy(&bytes);
+                    blocks.push(json!({
+                        "type": "text",
+                        "text": format!("— fichier {name} —\n{content}\n— fin {name} —")
+                    }));
+                }
+                Ok(_) => notes.push(format!("📎 {name} : fichier texte trop volumineux (> 64 Ko), non transmis")),
+                Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
+            },
+            AttachmentKind::Unsupported => {
+                notes.push(format!("📎 {name} : type non pris en charge (images et fichiers texte uniquement)"));
+            }
+        }
+    }
+
+    if blocks.is_empty() {
+        // ni texte ni pièce valide : message vide pour ne pas casser l'API
+        blocks.push(json!({"type": "text", "text": "(pièce jointe illisible)"}));
+    }
+    (blocks, notes)
+}
 
 // ---------------------------------------------------------------------------
 // Machine à états SSE (pure, testée)
@@ -183,10 +298,15 @@ pub async fn run(cfg: ChatConfig, mut rx: tokio::sync::mpsc::UnboundedReceiver<U
                 ui::clear(&weak);
                 ui::append(&weak, "status", "nouvelle conversation");
             }
-            UserEvent::Text(text) => {
-                ui::append(&weak, "user", &text);
+            UserEvent::Input { text, files } => {
+                // bulle utilisateur : texte + pièces
+                let mut bubble = text.clone();
+                for f in &files {
+                    bubble.push_str(&format!("\n📎 {} ({})", f.display(), attachment_meta(f)));
+                }
+                ui::append(&weak, "user", bubble.trim());
                 ui::set_busy(&weak, true);
-                if let Err(e) = run_turn(&cfg, &http, mcp.as_ref(), &tools, &system, &mut convo, &text, &weak).await {
+                if let Err(e) = run_turn(&cfg, &http, mcp.as_ref(), &tools, &system, &mut convo, &text, &files, &weak).await {
                     ui::append(&weak, "error", format!("{e:#}"));
                 }
                 ui::set_busy(&weak, false);
@@ -225,9 +345,14 @@ async fn run_turn(
     system: &str,
     convo: &mut Vec<Value>,
     user_text: &str,
+    files: &[PathBuf],
     weak: &Weak<ChatWindow>,
 ) -> anyhow::Result<()> {
-    convo.push(json!({"role": "user", "content": user_text}));
+    let (blocks, notes) = build_user_content(user_text, files, &|p| std::fs::read(p));
+    for note in notes {
+        ui::append(weak, "error", note);
+    }
+    convo.push(json!({"role": "user", "content": blocks}));
 
     for _round in 0..MAX_ROUNDS {
         ui::set_status(weak, "réflexion…");
@@ -457,5 +582,67 @@ mod tests {
         let s = "é".repeat(10); // 20 octets
         let t = truncate_str(&s, 11); // coupe dans un multi-octet
         assert!(t.ends_with('…') && t.len() < 14);
+    }
+
+    #[test]
+    fn classification_pieces() {
+        assert_eq!(classify_attachment(Path::new("/x/a.png")), AttachmentKind::Image("image/png"));
+        assert_eq!(classify_attachment(Path::new("/x/A.JPG")), AttachmentKind::Image("image/jpeg"));
+        assert_eq!(classify_attachment(Path::new("/x/a.webp")), AttachmentKind::Image("image/webp"));
+        assert_eq!(classify_attachment(Path::new("/x/hyprland.lua")), AttachmentKind::Text);
+        assert_eq!(classify_attachment(Path::new("/x/notes.md")), AttachmentKind::Text);
+        assert_eq!(classify_attachment(Path::new("/x/doc.pdf")), AttachmentKind::Unsupported);
+        assert_eq!(classify_attachment(Path::new("/x/sans-ext")), AttachmentKind::Unsupported);
+    }
+
+    #[test]
+    fn blocs_anthropic_avec_pieces() {
+        let png = PathBuf::from("/tmp/fake.png");
+        let lua = PathBuf::from("/tmp/config.lua");
+        let pdf = PathBuf::from("/tmp/doc.pdf");
+        let read = |p: &Path| -> std::io::Result<Vec<u8>> {
+            match p.extension().and_then(|e| e.to_str()) {
+                Some("png") => Ok(vec![1, 2, 3, 4]),
+                Some("lua") => Ok(b"gaps_in = 5".to_vec()),
+                _ => unreachable!(),
+            }
+        };
+        let (blocks, notes) = build_user_content("voici ma config", &[png.clone(), lua.clone(), pdf.clone()], &read);
+        assert_eq!(blocks.len(), 3); // texte + image + fichier texte
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
+        assert_eq!(blocks[1]["source"]["data"], base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4]));
+        assert!(blocks[2]["text"].as_str().unwrap().contains("— fichier config.lua —"));
+        assert!(blocks[2]["text"].as_str().unwrap().contains("gaps_in = 5"));
+        assert_eq!(notes.len(), 1); // le pdf
+        assert!(notes[0].contains("type non pris en charge"));
+    }
+
+    #[test]
+    fn piece_seule_sans_texte() {
+        let png = PathBuf::from("/tmp/img.png");
+        let read = |_p: &Path| Ok(vec![9u8; 3]);
+        let (blocks, notes) = build_user_content("", &[png], &read);
+        assert!(notes.is_empty());
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "image");
+    }
+
+    #[test]
+    fn image_trop_volumineuse_refusee() {
+        let png = PathBuf::from("/tmp/grosse.png");
+        let read = |_p: &Path| Ok(vec![0u8; (MAX_IMAGE_BYTES + 1) as usize]);
+        let (blocks, notes) = build_user_content("regarde", &[png], &read);
+        assert_eq!(blocks.len(), 1); // juste le texte
+        assert!(notes[0].contains("volumineuse"));
+    }
+
+    #[test]
+    fn rien_du_tout_message_de_secours() {
+        let (blocks, _) = build_user_content("ok", &[], &|_p| unreachable!());
+        assert_eq!(blocks.len(), 1);
+        let (blocks, _) = build_user_content("", &[], &|_p| unreachable!());
+        assert_eq!(blocks[0]["text"], "(pièce jointe illisible)");
     }
 }

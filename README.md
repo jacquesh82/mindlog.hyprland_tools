@@ -63,11 +63,12 @@ validation → capture) est transmis aux clients via les *server instructions*.
 - `/repl <expr Lua>` renvoie la valeur de l'expression : canal de lecture
   structuré (`hl.get_monitors()`, `hl.get_config(…)`, …).
 
-## Fenêtre de chat native (v2 — `hyprpanel-chat`)
+## Fenêtre de chat native — **LYRA** (`hyprpanel-chat`)
 
 Client chatbot graphique en **Slint** (crate `crates/hyprpanel-chat`, GPL-3.0
-car Slint est lié sous licence communautaire) : une fenêtre sombre où l'on
-discute directement avec le panneau.
+car Slint est lié sous licence communautaire) : **LYRA — Wayland Configuration
+Assistant**, habillage cyberpunk (fond `#0B0F1A`, wordmark cyan/magenta,
+badge pill), fenêtre où l'on discute directement avec le panneau.
 
 - **Boucle d'agent intégrée** : protocole Anthropic Messages en **streaming**
   (SSE), endpoint par défaut `https://api.z.ai/api/anthropic` (GLM-5.3),
@@ -76,6 +77,18 @@ discute directement avec le panneau.
 - **Client MCP** du daemon (rmcp, jeton en query) : les 20 outils du panneau
   sont exposés au LLM ; les appels et résultats s'affichent en bulles « outil ».
 - System prompt = règles de chat + instructions du serveur reçues au handshake.
+
+### Envoi de fichiers
+
+Bouton **« ＋ fichier »** (sélecteur `zenity`, sélection multiple) ; les pièces
+apparaissent en chips amovibles au-dessus de la saisie, envoyées avec le
+message :
+
+- images `png/jpeg/webp/gif` (≤ 5 Mo) → blocs `image` base64 pour le LLM
+- fichiers texte (md, lua, conf, toml, json, rs, py, sh…) ≤ 64 Ko → contenu
+  inliné délimité
+- autres types → note explicative, non transmis (PDF non supporté en v1 ;
+  si l'API refuse les images, l'erreur s'affiche en bulle)
 
 ```bash
 hyprpanel-chat init   # crée la config (clé Z.ai reprise silencieusement)
@@ -88,5 +101,6 @@ hyprpanel-chat        # ouvre la fenêtre
 
 Outil hôte local (socket Hyprland + fichiers de config) : ni conteneur ni
 déploiement distant, hors contrat images INFRA.md. v1 = serveur MCP pour
-Claude Code/ZCode ; v2 = fenêtre Slint cliente (`hyprpanel-chat`). Historique
-de conversation non persistant, un seul serveur MCP.
+Claude Code/ZCode ; v2 = fenêtre Slint cliente LYRA (`hyprpanel-chat`).
+Historique de conversation non persistant, un seul serveur MCP, pièces
+jointes sans glisser-déposer.

@@ -88,3 +88,43 @@ pub fn set_busy(weak: &Weak<ChatWindow>, busy: bool) {
         }
     });
 }
+
+/// Ajoute une chip de pièce jointe.
+pub fn attachment_push(weak: &Weak<ChatWindow>, name: &str, meta: &str) {
+    let name = name.to_string();
+    let meta = meta.to_string();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let model = ui.get_attachments();
+        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::AttachmentRow>>() {
+            m.push(crate::AttachmentRow { name: name.into(), meta: meta.into() });
+        }
+    });
+}
+
+/// Retire la chip d'index donné.
+pub fn attachment_remove(weak: &Weak<ChatWindow>, idx: usize) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let model = ui.get_attachments();
+        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::AttachmentRow>>() {
+            if idx < m.row_count() {
+                m.remove(idx);
+            }
+        }
+    });
+}
+
+/// Vide toutes les chips (au moment de l'envoi).
+pub fn attachments_clear(weak: &Weak<ChatWindow>) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let model = ui.get_attachments();
+        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::AttachmentRow>>() {
+            m.set_vec(Vec::new());
+        }
+    });
+}

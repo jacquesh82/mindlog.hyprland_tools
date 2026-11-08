@@ -23,8 +23,21 @@
   session MCP créée côté daemon. Écran verrouillé pendant la démo → test de
   conversation en conditions réelles à faire au déverrouillage.
 
+## v2.1 — LYRA : identité + pièces jointes
+- Restyle complet de la fenêtre : wordmark LYRA bicolore cyan/magenta, badge
+  pill « WAYLAND CONFIGURATION ASSISTANT », palette #0B0F1A/#141B2D/#1A2238,
+  bulles utilisateur en dégradé violet→rose. Porte visuelle validée par
+  capture + analyse d'image (badge/statut retravaillés après 1re passe).
+- Envoi de fichiers : bouton « ＋ fichier » (zenity multi-sélection, thread
+  dédié), chips amovibles, blocs Anthropic image base64 (≤5 Mo) / texte inliné
+  (≤64 Ko), refus propre des autres types. 5 nouveaux tests (14 au total
+  côté chat).
+- Écran déverrouillé : fenêtre LYRA relancée via unit transitoire
+  hyprpanel-chat-run ; test conversation réelle + envoi d'image à la main de
+  l'utilisateur.
+
 ## Suivis possibles
 - Streaming des bulles outil (statique aujourd'hui), historique persistant,
   bouton « arrêter » pendant une génération, keybind SUPER+Y à ajouter dans
-  hyprland.lua si adopté.
+  hyprland.lua si adopté, support PDF.
 

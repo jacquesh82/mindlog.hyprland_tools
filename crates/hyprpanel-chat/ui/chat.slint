@@ -7,9 +7,15 @@ export struct MessageRow {
     text: string,
 }
 
+// Pièce jointe en attente d'envoi (chip au-dessus de la saisie).
+export struct AttachmentRow {
+    name: string,
+    meta: string,   // « 12 Ko · image » par ex.
+}
+
 export component ChatWindow inherits Window {
-    title: "hyprpanel — chat";
-    background: #1e1e2e;
+    title: "LYRA — configuration Wayland";
+    background: #0B0F1A;
     preferred-width: 560px;
     preferred-height: 720px;
     min-width: 400px;
@@ -19,9 +25,12 @@ export component ChatWindow inherits Window {
     in-out property <string> model-label: "";
     in-out property <bool> busy: false;
     in-out property <[MessageRow]> messages;
+    in-out property <[AttachmentRow]> attachments;
 
     callback send(string);
     callback new-conversation();
+    callback attach-clicked();
+    callback remove-attachment(int);
 
     // Ancre le défilement sur le message le plus récent.
     public function scroll-bottom() {
@@ -29,25 +38,55 @@ export component ChatWindow inherits Window {
     }
 
     VerticalLayout {
-        // ── Barre d'état ───────────────────────────────────────────────
+        // ── En-tête : wordmark LYRA + pill ─────────────────────────────
         Rectangle {
-            height: 36px;
-            background: #181825;
+            height: 44px;
+            background: #111827;
             HorizontalLayout {
-                padding-left: 12px;
+                padding-left: 14px;
                 padding-right: 8px;
-                spacing: 8px;
+                spacing: 10px;
                 alignment: center;
-                Text {
-                    text: "hyprpanel";
-                    color: #cba6f7;
-                    font-weight: 700;
-                    vertical-alignment: center;
+                HorizontalLayout {
+                    alignment: start;
+                    Text {
+                        text: "LY";
+                        color: #22D3EE;
+                        font-weight: 800;
+                        font-size: 18px;
+                        letter-spacing: 3px;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: "RA";
+                        color: #D946EF;
+                        font-weight: 800;
+                        font-size: 18px;
+                        letter-spacing: 3px;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {
+                        border-radius: 999px;
+                        border-width: 1px;
+                        border-color: #155E75;
+                        background: #0B0F1A;
+                        drop-shadow-blur: 8px;
+                        drop-shadow-color: #22D3EE66;
+                        height: 22px;
+                        Text {
+                            text: "WAYLAND CONFIGURATION ASSISTANT";
+                            color: #7DD3FC;
+                            font-size: 9px;
+                            font-weight: 500;
+                            letter-spacing: 2px;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                        }
+                    }
                 }
-                Rectangle { width: 1px; height: 16px; background: #313244; }
                 Text {
                     text: root.busy ? root.status + "  ●" : root.status;
-                    color: #a6adc8;
+                    color: #A8B3C5;
                     font-size: 12px;
                     vertical-alignment: center;
                     overflow: elide;
@@ -76,52 +115,143 @@ export component ChatWindow inherits Window {
                             padding: 4px;
                             Text {
                                 text: row.text;
-                                color: #6c7086;
+                                color: #64748B;
                                 font-size: 11px;
                             }
                         }
-                        if row.kind != "status": Rectangle {
-                            border-radius: 8px;
-                            background: row.kind == "user"      ? #45475a :
-                                        row.kind == "assistant" ? #313244 :
-                                        row.kind == "tool"      ? #181825 :
-                                                                  #472b3d;
-                            height: bubble.preferred-height + 16px;
-                            bubble := HorizontalLayout {
-                                padding: 8px;
-                                spacing: 10px;
-                                alignment: start;
-                                // barre d'accent à gauche, couleur selon le type
-                                Rectangle {
-                                    width: 3px;
-                                    border-radius: 2px;
-                                    background: row.kind == "user"      ? #89b4fa :
-                                                row.kind == "assistant" ? #a6e3a1 :
-                                                row.kind == "tool"      ? #f9e2af :
-                                                                          #f38ba8;
+                        if row.kind == "user": HorizontalLayout {
+                            alignment: end;
+                            Rectangle {
+                                width: min(root.width - 48px, utxt.preferred-width + 26px);
+                                height: utxt.preferred-height + 14px;
+                                border-radius: 12px;
+                                background: @linear-gradient(135deg, #8B5CF6, #EC4899);
+                                utxt := Text {
+                                    x: 13px;
+                                    y: 7px;
+                                    width: parent.width - 26px;
+                                    text: row.text;
+                                    color: #FFFFFF;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
                                 }
-                                VerticalLayout {
+                            }
+                        }
+                        if row.kind == "assistant": HorizontalLayout {
+                            alignment: start;
+                            Rectangle {
+                                width: min(root.width - 48px, atxt.preferred-width + 26px);
+                                height: atxt.preferred-height + 14px;
+                                border-radius: 12px;
+                                background: #1A2238;
+                                border-width: 1px;
+                                border-color: #233049;
+                                atxt := Text {
+                                    x: 13px;
+                                    y: 7px;
+                                    width: parent.width - 26px;
+                                    text: row.text;
+                                    color: #E5E7EB;
+                                    font-size: 13px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                        if row.kind == "tool": HorizontalLayout {
+                            alignment: start;
+                            Rectangle {
+                                width: root.width - 48px;
+                                border-radius: 8px;
+                                background: #0F1524;
+                                border-width: 1px;
+                                border-color: #1E293B;
+                                height: tcol.preferred-height + 14px;
+                                tcol := VerticalLayout {
+                                    x: 12px;
+                                    y: 7px;
+                                    width: parent.width - 24px;
                                     spacing: 2px;
                                     Text {
-                                        text: row.kind == "user"      ? "vous" :
-                                              row.kind == "assistant" ? root.model-label :
-                                              row.kind == "tool"      ? "outil" :
-                                                                        "erreur";
-                                        color: row.kind == "user"      ? #89b4fa :
-                                              row.kind == "assistant" ? #a6e3a1 :
-                                              row.kind == "tool"      ? #f9e2af :
-                                                                        #f38ba8;
-                                        font-size: 11px;
+                                        text: "outil";
+                                        color: #22D3EE;
+                                        font-size: 10px;
                                         font-weight: 700;
+                                        letter-spacing: 1px;
                                     }
                                     Text {
                                         text: row.text;
-                                        color: #cdd6f4;
-                                        font-size: row.kind == "tool" ? 11px : 13px;
-                                        font-family: row.kind == "tool" ? "monospace" : "sans-serif";
+                                        color: #9CA3AF;
+                                        font-size: 11px;
+                                        font-family: "monospace";
                                         wrap: word-wrap;
-                                        horizontal-stretch: 1;
                                     }
+                                }
+                            }
+                        }
+                        if row.kind == "error": HorizontalLayout {
+                            alignment: start;
+                            Rectangle {
+                                width: root.width - 48px;
+                                border-radius: 8px;
+                                background: #2D1220;
+                                border-width: 1px;
+                                border-color: #831843;
+                                height: etxt.preferred-height + 14px;
+                                etxt := Text {
+                                    x: 12px;
+                                    y: 7px;
+                                    width: parent.width - 24px;
+                                    text: row.text;
+                                    color: #FDA4AF;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Pièces jointes en attente ──────────────────────────────────
+        if root.attachments.length > 0: Rectangle {
+            background: #0D1322;
+            height: chips.preferred-height + 8px;
+            HorizontalLayout {
+                padding: 4px;
+                chips := HorizontalLayout {
+                    spacing: 6px;
+                    for a[i] in root.attachments: Rectangle {
+                        border-radius: 999px;
+                        background: #16233D;
+                        border-width: 1px;
+                        border-color: #274060;
+                        height: 24px;
+                        HorizontalLayout {
+                            padding-left: 10px;
+                            padding-right: 2px;
+                            spacing: 6px;
+                            alignment: center;
+                            Text {
+                                text: a.name + "  " + a.meta;
+                                color: #CBD5E1;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+                            Rectangle {
+                                width: 20px;
+                                border-radius: 999px;
+                                background: rm.has-hover ? #3B1526 : #1E3A5F;
+                                rm := TouchArea {
+                                    clicked => { root.remove-attachment(i); }
+                                }
+                                Text {
+                                    text: "×";
+                                    color: #E2E8F0;
+                                    font-size: 13px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
                                 }
                             }
                         }
@@ -132,18 +262,23 @@ export component ChatWindow inherits Window {
 
         // ── Saisie ────────────────────────────────────────────────────
         Rectangle {
-            background: #181825;
+            background: #111827;
             height: 52px;
             HorizontalLayout {
                 padding: 8px;
                 spacing: 8px;
                 alignment: center;
+                Button {
+                    text: "＋ fichier";
+                    enabled: !root.busy;
+                    clicked => { root.attach-clicked(); }
+                }
                 le := LineEdit {
                     horizontal-stretch: 1;
-                    placeholder-text: "Réglage à demander… (Entrée pour envoyer)";
+                    placeholder-text: "Demander un réglage à LYRA… (Entrée pour envoyer)";
                     enabled: !root.busy;
                     accepted(t) => {
-                        if (t != "") {
+                        if (t != "" || root.attachments.length > 0) {
                             root.send(t);
                             le.text = "";
                         }
@@ -151,9 +286,9 @@ export component ChatWindow inherits Window {
                 }
                 Button {
                     text: "envoyer";
-                    enabled: !root.busy && le.text != "";
+                    enabled: !root.busy && (le.text != "" || root.attachments.length > 0);
                     clicked => {
-                        if (le.text != "") {
+                        if (le.text != "" || root.attachments.length > 0) {
                             root.send(le.text);
                             le.text = "";
                         }

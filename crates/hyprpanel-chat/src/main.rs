@@ -45,21 +45,75 @@ fn main() -> anyhow::Result<()> {
         let model: slint::ModelRc<MessageRow> =
             std::rc::Rc::new(slint::VecModel::<MessageRow>::from(Vec::new())).into();
         app.set_messages(model);
+        let chips: slint::ModelRc<AttachmentRow> =
+            std::rc::Rc::new(slint::VecModel::<AttachmentRow>::from(Vec::new())).into();
+        app.set_attachments(chips);
     }
+
+    // Miroir Rust des pièces jointes (le modèle Slint ne s'itère pas depuis
+    // les callbacks ; les deux restent synchronisés sous ce mutex).
+    let pending_files: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // UI → agent : canal non borné ; l'agent tourne dans un runtime tokio
     // hébergé par un thread dédié, la boucle d'événements Slint garde le main.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<agent::UserEvent>();
     {
         let tx_reset = tx.clone();
+        let files_for_send = pending_files.clone();
+        let weak_send = app.as_weak();
         app.on_send(move |text| {
-            let text = text.trim().to_string();
-            if !text.is_empty() {
-                let _ = tx.send(agent::UserEvent::Text(text));
+            let files: Vec<_> = std::mem::take(&mut *files_for_send.lock().expect("pièces empoisonnées"));
+            if text.trim().is_empty() && files.is_empty() {
+                return;
             }
+            ui::attachments_clear(&weak_send);
+            let _ = tx.send(agent::UserEvent::Input { text: text.trim().to_string(), files });
         });
         app.on_new_conversation(move || {
             let _ = tx_reset.send(agent::UserEvent::Reset);
+        });
+
+        // Sélecteur de fichiers (zenity) dans un thread dédié — il bloque
+        // jusqu'à la fermeture de la boîte de dialogue.
+        let files_for_pick = pending_files.clone();
+        let weak_pick = app.as_weak();
+        app.on_attach_clicked(move || {
+            let files_for_pick = files_for_pick.clone();
+            let weak_pick = weak_pick.clone();
+            std::thread::spawn(move || {
+                let output = std::process::Command::new("zenity")
+                    .args([
+                        "--file-selection",
+                        "--multiple",
+                        "--separator=\n",
+                        "--title=Joindre des fichiers à LYRA",
+                    ])
+                    .output();
+                let Ok(out) = output else { return };
+                if !out.status.success() {
+                    return; // annulé par l'utilisateur
+                }
+                let chosen = String::from_utf8_lossy(&out.stdout);
+                for line in chosen.lines().filter(|l| !l.is_empty()) {
+                    let path = std::path::PathBuf::from(line);
+                    files_for_pick.lock().expect("pièces empoisonnées").push(path.clone());
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| line.to_string());
+                    ui::attachment_push(&weak_pick, &name, &agent::attachment_meta(&path));
+                }
+            });
+        });
+
+        let files_for_remove = pending_files.clone();
+        app.on_remove_attachment(move |idx| {
+            let idx = idx as usize;
+            let mut guard = files_for_remove.lock().expect("pièces empoisonnées");
+            if idx < guard.len() {
+                guard.remove(idx);
+            }
         });
     }
 

@@ -1,9 +1,9 @@
 # CLAUDE.md — mindlog.hyprland_tools (hyprpanel)
 
 Panneau de configuration Hyprland piloté par chatbot : daemon Rust + serveur
-MCP (HTTP streamable + jeton) **et** fenêtre cliente Slint (`hyprpanel-chat`,
-boucle d'agent Anthropic Messages en streaming). Config Hyprland cible :
-**Lua** (`hl.*`), 0.57.x.
+MCP (HTTP streamable + jeton) **et** fenêtre cliente Slint **LYRA**
+(`hyprpanel-chat`, boucle d'agent Anthropic Messages en streaming, pièces
+jointes images/texte). Config Hyprland cible : **Lua** (`hl.*`), 0.57.x.
 
 ## Règles du projet
 
@@ -38,6 +38,10 @@ journalctl --user -u hyprpanel   # logs du daemon
   construction du message (voir `ipc::tests`).
 - SSE/LLM : la machine à états (`agent::apply_event`) reste pure et testée ;
   l'accès UI passe par `ui.rs` (invoke_from_event_loop uniquement).
+- Pièces jointes : classification/blocs Anthropic dans `agent.rs`
+  (`classify_attachment`, `build_user_content`) — purs et testés ; sélecteur
+  zenity dans `main.rs` (thread dédié). Le miroir Rust des chips
+  (`Arc<Mutex<Vec<PathBuf>>>`) fait foi, le modèle Slint n'est que l'affichage.
 - Outil hôte local : pas de Docker, pas de déploiement (hors contrat INFRA.md).
 - Sous-dépôt git indépendant, listé dans le `.gitignore` du monorepo
   mindlog.today (pattern « mindlog.* sous-dépôts ignorés »).
