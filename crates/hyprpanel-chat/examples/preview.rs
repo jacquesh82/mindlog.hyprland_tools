@@ -982,6 +982,54 @@ fn main() -> anyhow::Result<()> {
     );
     app.set_busy(false);
 
+    // Variantes du formulaire : les clients natifs n'ont pas les champs Zcode
+    // dont la largeur masquait auparavant le rétrécissement du formulaire.
+    app.set_cfg_system_context("".into());
+    app.set_environment_text("{\n  \"os\": \"linux\",\n  \"username\": \"desktop-user\",\n  \"package_managers\": [\"pacman\", \"flatpak\"],\n  \"session\": {\"XDG_SESSION_TYPE\": \"wayland\"}\n}".into());
+    app.set_clients_claude_ok(true);
+    app.set_clients_zcode_ok(true);
+    for (name, provider, lang, approved, width, height) in [
+        ("zcode-wide", 0, i18n::Lang::Fr, true, 1080, 800),
+        ("claude-wide", 1, i18n::Lang::En, true, 1080, 800),
+        ("codex", 2, i18n::Lang::Fr, true, 680, 800),
+        ("codex-compact", 2, i18n::Lang::Fr, false, 480, 600),
+        ("claude-compact", 1, i18n::Lang::En, false, 480, 600),
+    ] {
+        app.set_overlay("none".into());
+        snapshot(
+            &app,
+            &window,
+            &out.join("settings-transition.png"),
+            width,
+            height,
+        )?;
+        app.set_tr(i18n::tr(lang).to_slint());
+        app.set_provider_index(provider);
+        app.set_fs_approved(approved);
+        app.set_cfg_model(if provider == 0 { "GLM-5.3" } else { "" }.into());
+        app.set_overlay("settings".into());
+        snapshot(
+            &app,
+            &window,
+            &out.join(format!("settings-{name}.png")),
+            width,
+            height,
+        )?;
+        app.window().dispatch_event(WindowEvent::PointerScrolled {
+            position: slint::LogicalPosition::new(width as f32 / 2., height as f32 / 2.),
+            delta_x: 0.,
+            delta_y: -2000.,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(220));
+        snapshot(
+            &app,
+            &window,
+            &out.join(format!("settings-{name}-bottom.png")),
+            width,
+            height,
+        )?;
+    }
+
     println!(
         "Captures écrites dans {} ; interactions vérifiées.",
         out.display()

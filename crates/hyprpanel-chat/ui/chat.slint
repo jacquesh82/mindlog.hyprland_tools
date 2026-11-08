@@ -3,7 +3,7 @@ import { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
 export { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
 import { RichContent } from "rich-content.slint";
 export { SwatchRow, ChoiceOptionRow } from "choice-types.slint";
-import { Button, LineEdit, ComboBox, TextEdit, Palette, Spinner, CheckBox } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, TextEdit, Palette, Spinner, CheckBox, ScrollView } from "std-widgets.slint";
 import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader, ToolDetails, ChoiceCard } from "components.slint";
 export { AvatarFrames } from "components.slint";
 
@@ -795,11 +795,19 @@ export component ChatWindow inherits Window {
                             font-size: 13px;
                             wrap: word-wrap;
                         }
-                        Flickable {
+                        settings-scroll := ScrollView {
                             vertical-stretch: 1;
-                            content-height: setform.preferred-height;
-                            VerticalLayout {
+                            horizontal-stretch: 1;
+                            min-width: 0px;
+                            max-width: 16384px;
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.visible-width;
+                            content-height: settings-content.preferred-height;
+                            settings-content := VerticalLayout {
+                                width: settings-scroll.visible-width;
+                                height: self.preferred-height;
                                 padding: 2px;
+                                padding-right: 16px;
                                 spacing: 8px;
                                 setform := VerticalLayout {
                                     spacing: 8px;
@@ -817,7 +825,7 @@ export component ChatWindow inherits Window {
                                         checked <=> root.cfg-animate-avatar;
                                     }
                                     HorizontalLayout {
-                                        height: 38px;
+                                        min-height: 38px;
                                         spacing: 12px;
                                         Text {
                                             text: root.fs-approved ? root.tr.fs-granted : root.tr.fs-denied;
