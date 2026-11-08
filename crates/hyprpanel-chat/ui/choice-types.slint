@@ -1,0 +1,7 @@
+export struct SwatchRow { hex: string, paint: color }
+export struct ChoiceOptionRow {
+    id: string, label: string, description: string, value: string,
+    swatches: [SwatchRow], colors-text: string,
+    preview: image, preview-missing: bool,
+    source: string, source-label: string, selected: bool,
+}

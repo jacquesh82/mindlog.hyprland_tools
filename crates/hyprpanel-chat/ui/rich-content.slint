@@ -1,0 +1,97 @@
+import { Theme } from "components.slint";
+import { RichBlockRow } from "richtext-types.slint";
+
+export component RichContent inherits Rectangle {
+    in property <[RichBlockRow]> blocks;
+    callback open-link(string);
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 12px;
+        for block in root.blocks: Rectangle {
+            height: block-layout.preferred-height;
+            block-layout := HorizontalLayout {
+                width: parent.width;
+                spacing: 8px;
+                padding-left: block.indent * 16px;
+                if block.marker != "": Text {
+                    text: block.marker;
+                    color: Theme.accent;
+                    font-size: 14px;
+                    width: 22px;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    if block.kind == "paragraph" || block.kind == "heading": StyledText {
+                        text: block.content;
+                        default-color: Theme.text;
+                        default-font-size: block.kind == "heading" ? (block.level == 1 ? 24px : block.level == 2 ? 20px : 17px) : 14px;
+                        link-color: Theme.accent;
+                        link-clicked(url) => { root.open-link(url); }
+                    }
+                    if block.kind == "quote": Rectangle {
+                        height: quote.preferred-height + 20px;
+                        background: #1B2A31;
+                        border-radius: 6px;
+                        Rectangle { x: 0px; y: 0px; width: 3px; height: parent.height; background: Theme.accent; }
+                        quote := StyledText {
+                            x: 14px; y: 10px; width: parent.width - 28px;
+                            text: block.content;
+                            default-color: Theme.secondary;
+                            default-font-size: 14px;
+                            link-color: Theme.accent;
+                            link-clicked(url) => { root.open-link(url); }
+                        }
+                    }
+                    if block.kind == "code": Rectangle {
+                        height: code.preferred-height + 24px;
+                        background: Theme.canvas;
+                        border-radius: 8px;
+                        border-width: 1px;
+                        border-color: Theme.border;
+                        code := VerticalLayout {
+                            x: 12px; y: 12px; width: parent.width - 24px;
+                            height: self.preferred-height;
+                            spacing: 8px;
+                            if block.language != "": Text {
+                                text: block.language;
+                                color: Theme.muted;
+                                font-size: 11px;
+                            }
+                            Text {
+                                text: block.text;
+                                color: #BDE7DB;
+                                font-size: 13px;
+                                font-family: "DejaVu Sans Mono";
+                                line-height-factor: 1.3;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    if block.kind == "rule": Rectangle { height: 1px; background: Theme.border; }
+                    if block.kind == "table": VerticalLayout {
+                        spacing: 2px;
+                        for row in block.rows: Rectangle {
+                            height: cells.preferred-height + 18px;
+                            background: row.header ? #24333D : Theme.canvas;
+                            border-radius: 4px;
+                            cells := HorizontalLayout {
+                                x: 10px; y: 9px; width: parent.width - 20px;
+                                spacing: 12px;
+                                for cell in row.cells: StyledText {
+                                    min-width: 0px;
+                                    preferred-width: 0px;
+                                    horizontal-stretch: 1;
+                                    text: cell.content;
+                                    default-color: Theme.text;
+                                    default-font-size: 13px;
+                                    link-color: Theme.accent;
+                                    link-clicked(url) => { root.open-link(url); }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

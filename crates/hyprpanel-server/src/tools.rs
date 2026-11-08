@@ -161,7 +161,7 @@ impl Panel {
             "config_files": files.len(),
             "events_buffered": self.state.events.len(),
             "serveur_demarre": timefmt::iso(self.state.started),
-            "notes": "config Lua (API hl.*). monitors.lua/inputs.lua sont générés par hyprdmc : lecture seule.",
+            "notes": "config Lua (API hl.*). monitors.lua/inputs.lua sont générés par un outil externe : lecture seule.",
         });
         text(json_out(&out))
     }
@@ -305,7 +305,7 @@ impl Panel {
 
     /// Inventorie les fichiers de configuration Hyprland (`hyprland.lua`
     /// principal, modules Lua, .conf hyprpaper/hypridle/hyprlock, thèmes) et
-    /// signale ceux générés par hyprdmc (lecture seule). C'est la carte du
+    /// signale ceux générés par un outil externe (lecture seule). C'est la carte du
     /// terrain avant toute édition persistante.
     #[tool]
     pub async fn hypr_config_files(&self) -> Result<CallToolResult, ErrorData> {
@@ -315,7 +315,7 @@ impl Panel {
             "fichiers": files,
             "regles": [
                 "éditer hyprland.lua (config principale, API hl.*) avec les outils fichiers natifs, puis hypr_reload",
-                "monitors.lua et inputs.lua sont générés par hyprdmc : NE PAS les éditer (écrasés au redémarrage du démon)",
+                "monitors.lua et inputs.lua sont générés par un outil externe : NE PAS les éditer (écrasés au redémarrage du démon)",
                 "hypr_backup avant une série de modifications, hypr_restore_backup pour revenir en arrière",
             ],
         });
@@ -437,5 +437,5 @@ impl Panel {
 /// Instructions transmises aux clients MCP (Claude Code, ZCode…) au handshake.
 /// (Littéral requis par le macro `tool_handler`.)
 // (version.workspace = 0.1.0 — le macro n'accepte que des littéraux)
-#[tool_handler(name = "hyprpanel", version = "0.1.0", instructions = "Panneau de configuration Hyprland (configuration Lua, API hl.*).\n\nWORKFLOW RECOMMANDÉ\n1. hypr_status puis hypr_config_files pour situer la configuration.\n2. Tester un réglage À CHAUD avec hypr_set_option_live (aperçu non persistant) et confirmer visuellement (hypr_screenshot, hypr_recent_events).\n3. Pour persister : éditer ~/.config/hypr/hyprland.lua avec tes outils fichiers natifs (hypr_find_setting localise la ligne), puis hypr_reload et vérifier hypr_config_errors.\n4. hypr_backup avant une série d'éditions ; hypr_restore_backup + hypr_reload pour annuler.\n\nRÈGLES\n- monitors.lua et inputs.lua sont générés par hyprdmc : NE JAMAIS les éditer.\n- getoption/hl.get_config lisent l'état des fichiers : un réglage appliqué à chaud peut y afficher l'ancienne valeur alors qu'il est actif.\n- hypr_set_option_live répond ok même pour une option inconnue : toujours vérifier l'effet réel.\n- Prévenir l'utilisateur avec hypr_notify avant un changement visible important.")]
+#[tool_handler(name = "hyprpanel", version = "0.1.0", instructions = "Panneau de configuration Hyprland (configuration Lua, API hl.*).\n\nWORKFLOW RECOMMANDÉ\n1. hypr_status puis hypr_config_files pour situer la configuration.\n2. Tester un réglage À CHAUD avec hypr_set_option_live (aperçu non persistant) et confirmer visuellement (hypr_screenshot, hypr_recent_events).\n3. Pour persister : éditer ~/.config/hypr/hyprland.lua avec tes outils fichiers natifs (hypr_find_setting localise la ligne), puis hypr_reload et vérifier hypr_config_errors.\n4. hypr_backup avant une série d'éditions ; hypr_restore_backup + hypr_reload pour annuler.\n\nRÈGLES\n- monitors.lua et inputs.lua sont générés par un outil externe : NE JAMAIS les éditer.\n- getoption/hl.get_config lisent l'état des fichiers : un réglage appliqué à chaud peut y afficher l'ancienne valeur alors qu'il est actif.\n- hypr_set_option_live répond ok même pour une option inconnue : toujours vérifier l'effet réel.\n- Prévenir l'utilisateur avec hypr_notify avant un changement visible important.")]
 impl ServerHandler for Panel {}

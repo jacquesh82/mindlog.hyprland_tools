@@ -10,7 +10,7 @@ jointes images/texte). Config Hyprland cible : **Lua** (`hl.*`), 0.57.x.
 - `crates/hyprpanel-core` ne dépend d'aucune couche réseau : réutilisé par le
   serveur MCP (`hyprpanel-server`) et la fenêtre (`hyprpanel-chat`).
 - **Jamais d'édition de `~/.config/hypr/monitors.lua` ni `inputs.lua`** :
-  générés par hyprdmc (github.com/jacquesh82/hyprdmc).
+  générés par un outil externe.
 - Le serveur ne réécrit pas la config : aperçu à chaud (`hl.dsp.global("conf …")`)
   + validation (`reload`, `configerrors`) + backups ; l'agent édite le Lua.
 - `getoption`/`hl.get_config` = état fichiers, pas les overrides runtime.

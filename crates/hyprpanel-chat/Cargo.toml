@@ -16,7 +16,8 @@ rmcp = { version = "3", default-features = false, features = ["client", "transpo
 slint = "1.18"
 # Le transport LLM (HTTPS, SSE) est porté par langchain-rust ; le reqwest de
 # rmcp reste sans TLS, réservé au MCP local.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util", "process"] }
+tempfile = "3"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -24,9 +25,13 @@ anyhow = "1"
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 langchain-rust = "8.0.0"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+html5ever = "0.26"
+markup5ever_rcdom = "0.2"
 
 [build-dependencies]
 slint-build = "1.18"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

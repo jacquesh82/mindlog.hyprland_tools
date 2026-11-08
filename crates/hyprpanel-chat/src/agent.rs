@@ -9,24 +9,24 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 use base64::Engine as _;
 use futures_util::StreamExt;
 use langchain_rust::language_models::options::CallOptions;
-use langchain_rust::language_models::{llm::LLM, GenerateResult, LLMEvent};
+use langchain_rust::language_models::{GenerateResult, LLMEvent, llm::LLM};
 use langchain_rust::llm::claude::Claude;
 use langchain_rust::schemas::{FunctionDefinition, ImageContent, Message};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use slint::Weak;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use hyprpanel_core::timefmt;
 
+use crate::ChatWindow;
 use crate::chat_config::ChatConfig;
-use crate::i18n::{tr, Lang, Tr};
+use crate::i18n::{Lang, Tr, tr};
 use crate::mcp::McpSession;
 use crate::ui;
-use crate::ChatWindow;
 
 /// Événements envoyés par l'UI vers la boucle agent.
 pub enum UserEvent {
@@ -34,6 +34,7 @@ pub enum UserEvent {
     Reset,
     ConfigUpdated(Box<ChatConfig>),
     Restore(String),
+    Choice { display: String, context: String },
 }
 
 const MAX_ROUNDS: usize = 12;
@@ -115,7 +116,9 @@ fn build_user_message(
                         base64::engine::general_purpose::STANDARD.encode(&bytes),
                     ));
                 }
-                Ok(_) => notes.push(format!("📎 {name} : image trop volumineuse (> 5 Mo), non transmise")),
+                Ok(_) => notes.push(format!(
+                    "📎 {name} : image trop volumineuse (> 5 Mo), non transmise"
+                )),
                 Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
             },
             AttachmentKind::Text => match read(file) {
@@ -123,11 +126,15 @@ fn build_user_message(
                     let inner = String::from_utf8_lossy(&bytes);
                     content.push_str(&format!("\n\n— fichier {name} —\n{inner}\n— fin {name} —"));
                 }
-                Ok(_) => notes.push(format!("📎 {name} : fichier texte trop volumineux (> 64 Ko), non transmis")),
+                Ok(_) => notes.push(format!(
+                    "📎 {name} : fichier texte trop volumineux (> 64 Ko), non transmis"
+                )),
                 Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
             },
             AttachmentKind::Unsupported => {
-                notes.push(format!("📎 {name} : type non pris en charge (images et fichiers texte uniquement)"));
+                notes.push(format!(
+                    "📎 {name} : type non pris en charge (images et fichiers texte uniquement)"
+                ));
             }
         }
     }
@@ -140,7 +147,10 @@ fn build_user_message(
             "(image)".to_string()
         };
     }
-    (Message::new_human_message(content).with_images(images), notes)
+    (
+        Message::new_human_message(content).with_images(images),
+        notes,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -204,8 +214,12 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
     let mut cfg = cfg;
     let mut translations = tr(cfg.lang());
 
-    if cfg.api_key.trim().is_empty() {
-        ui::append(&weak, "error", "Clé API absente : remplissez « clé API » dans ⚙ réglages.\n/api key missing: fill it in the ⚙ settings panel.");
+    if cfg.provider == crate::chat_config::Provider::Zcode && cfg.api_key.trim().is_empty() {
+        ui::append(
+            &weak,
+            "error",
+            "Clé API absente : remplissez « clé API » dans ⚙ réglages.\n/api key missing: fill it in the ⚙ settings panel.",
+        );
     }
 
     // Connexion MCP + définitions d'outils pour le LLM.
@@ -217,18 +231,26 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 Some(session)
             }
             Err(e) => {
-                ui::append(&weak, "error", format!("{} : {e:#}", translations.mcp_unavailable));
+                ui::append(
+                    &weak,
+                    "error",
+                    format!("{} : {e:#}", translations.mcp_unavailable),
+                );
                 ui::set_status(&weak, "MCP ✗");
                 None
             }
         },
         Err(e) => {
-            ui::append(&weak, "error", format!("Config du daemon introuvable : {e} (lancez `hyprpanel init`)"));
+            ui::append(
+                &weak,
+                "error",
+                format!("Config du daemon introuvable : {e} (lancez `hyprpanel init`)"),
+            );
             ui::set_status(&weak, "daemon ✗");
             None
         }
     };
-    let functions: Vec<FunctionDefinition> = mcp
+    let mut functions: Vec<FunctionDefinition> = mcp
         .as_ref()
         .map(|m| {
             m.tools()
@@ -243,19 +265,31 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 .collect()
         })
         .unwrap_or_default();
-
-    // Clients externes : bulle d'information si Claude Code / ZCode manquent.
-    notify_missing_clients(&weak, &cfg);
+    functions.extend(crate::choices::tool_definitions());
 
     let mut llm = build_llm(&cfg, &functions);
-    let mut system = build_system(cfg.lang(), mcp.as_ref().and_then(|m| m.instructions()).as_deref());
+    let mut system = build_system(
+        cfg.lang(),
+        mcp.as_ref().and_then(|m| m.instructions()).as_deref(),
+    );
     let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
     let mut ledger = Ledger::load(crate::chat_config::state_history_path());
     ui::history_set(&weak, &ledger.records);
 
     while let Some(event) = rx.recv().await {
+        let (event, choice_display) = match event {
+            UserEvent::Choice { display, context } => (
+                UserEvent::Input {
+                    text: context,
+                    files: Vec::new(),
+                },
+                Some(display),
+            ),
+            event => (event, None),
+        };
         match event {
+            UserEvent::Choice { .. } => unreachable!("choix normalisé en message utilisateur"),
             UserEvent::Reset => {
                 convo = vec![Message::new_system_message(system.clone())];
                 ui::clear(&weak);
@@ -265,22 +299,27 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 cfg = *new_cfg;
                 translations = tr(cfg.lang());
                 ui::set_tr(&weak, translations.to_slint());
-                system = build_system(cfg.lang(), mcp.as_ref().and_then(|m| m.instructions()).as_deref());
+                system = build_system(
+                    cfg.lang(),
+                    mcp.as_ref().and_then(|m| m.instructions()).as_deref(),
+                );
                 convo[0] = Message::new_system_message(system.clone());
                 llm = build_llm(&cfg, &functions);
                 ui::set_status(&weak, &translations.settings_saved);
                 ui::append(&weak, "status", &translations.settings_saved);
             }
             UserEvent::Input { text, files } => {
-                let mut bubble = text.clone();
+                let visible_text = choice_display.as_deref().unwrap_or(&text);
+                let mut bubble = visible_text.to_string();
                 for f in &files {
                     bubble.push_str(&format!("\n📎 {} ({})", f.display(), attachment_meta(f)));
                 }
                 ui::append(&weak, "user", bubble.trim());
+                ui::set_activity(&weak, "tools");
 
                 // Registre + backup AVANT le tour : restaurable depuis ⟲.
                 let turn = ledger.next_turn();
-                let preview: String = text.chars().take(60).collect();
+                let preview: String = visible_text.chars().take(60).collect();
                 let backup = match mcp.as_ref() {
                     Some(m) => {
                         let mut args = Map::new();
@@ -301,18 +340,34 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 ui::history_set(&weak, &ledger.records);
 
                 ui::set_busy(&weak, true);
-                if let Err(e) =
-                    run_turn(&llm, mcp.as_ref(), &mut convo, &text, &files, &translations, &weak).await
+                if let Err(e) = run_turn(
+                    &cfg,
+                    &functions,
+                    &llm,
+                    mcp.as_ref(),
+                    &mut convo,
+                    &text,
+                    &files,
+                    &translations,
+                    &weak,
+                )
+                .await
                 {
                     ui::append(&weak, "error", format!("{e:#}"));
                 }
                 ui::set_busy(&weak, false);
-                ui::set_status(&weak, match &mcp {
-                    Some(m) => translations.mcp_tools.replace("{}", &m.tools().len().to_string()),
-                    None => translations.mcp_unavailable.clone(),
-                });
+                ui::set_status(
+                    &weak,
+                    match &mcp {
+                        Some(m) => translations
+                            .mcp_tools
+                            .replace("{}", &m.tools().len().to_string()),
+                        None => translations.mcp_unavailable.clone(),
+                    },
+                );
             }
             UserEvent::Restore(name) => {
+                ui::set_activity(&weak, "restore");
                 ui::set_busy(&weak, true);
                 ui::append(&weak, "status", &translations.restore_started);
                 let Some(mcp) = mcp.as_ref() else {
@@ -345,26 +400,6 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
     }
 }
 
-/// Prévient l'utilisateur si Claude Code ou ZCode ne sont pas enregistrés
-/// auprès du panneau, avec les commandes prêtes à coller.
-fn notify_missing_clients(weak: &Weak<ChatWindow>, cfg: &ChatConfig) {
-    let regs = hyprpanel_core::detect_clients();
-    if regs.all_registered() {
-        return;
-    }
-    let Ok(settings) = hyprpanel_core::Settings::load() else { return };
-    let snippets = hyprpanel_core::registration_snippets(&settings.token, settings.port);
-    let t = tr(cfg.lang());
-    let mut msg = format!("{} :", t.clients_notice);
-    if !regs.claude_code {
-        msg.push_str(&format!("\n\n• Claude Code — {}\n  {}", t.settings_clients_missing, snippets.claude_code));
-    }
-    if !regs.zcode {
-        msg.push_str(&format!("\n\n• ZCode — {}\n  {}", t.settings_clients_missing, snippets.zcode));
-    }
-    ui::append(weak, "error", msg);
-}
-
 fn build_llm(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> Claude {
     Claude::new()
         .with_model(cfg.model.clone())
@@ -394,6 +429,10 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
 (The server instructions below are written in French.)",
         ),
     };
+    system.push_str(match lang {
+        Lang::Fr => "\n\nCHOIX VISUELS : dès qu'une préférence ou une décision doit venir de l'utilisateur, utilise lyra_offer_choices pour afficher des options cliquables (texte, couleurs/palettes, images locales existantes ou schémas SVG autonomes). Pour les goûts et couleurs, consulte d'abord lyra_palette_catalog : il fournit une sélection Color Hunt avec les liens sources. Reprends les couleurs exactes et source_url ; ne présente pas une palette inventée comme provenant d'un site. Après avoir proposé les choix, attends le message user_choice issu du clic. Le clic exprime une préférence, pas une autorisation générale : respecte les confirmations et sauvegardes nécessaires avant de modifier le bureau. Les détails d'outils sont repliés dans l'interface ; garde tes messages visibles courts et utiles.",
+        Lang::En => "\n\nVISUAL CHOICES: whenever a preference or decision belongs to the user, use lyra_offer_choices to show clickable text, colors/palettes, existing local images or self-contained SVG diagrams. For colors, first consult lyra_palette_catalog for a selection from Color Hunt with source URLs. Preserve the exact colors and source_url; do not claim invented palettes come from a site. After offering choices, wait for the user_choice message produced by a click. A click expresses a preference, not blanket authorization: preserve the required confirmations and backups before changing the desktop. Tool details are collapsed in the UI; keep visible messages concise and useful.",
+    });
     if let Some(instructions) = server_instructions {
         system.push_str("\n\n—— Server instructions ——\n");
         system.push_str(instructions);
@@ -402,6 +441,8 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
 }
 
 async fn run_turn(
+    cfg: &ChatConfig,
+    functions: &[FunctionDefinition],
     llm: &Claude,
     session: Option<&McpSession>,
     convo: &mut Vec<Message>,
@@ -417,36 +458,79 @@ async fn run_turn(
     convo.push(message);
 
     for _round in 0..MAX_ROUNDS {
+        ui::set_activity(weak, "thinking");
         ui::set_status(weak, &translations.status_thinking);
-        let (text, result) = stream_turn(llm, convo, weak).await?;
+        let (text, result) = if cfg.provider == crate::chat_config::Provider::Zcode {
+            stream_turn(llm, convo, weak).await?
+        } else {
+            let result = crate::providers::generate(cfg, functions, convo).await?;
+            let text = result.generation.clone();
+            if !text.is_empty() {
+                ui::set_activity(weak, "writing");
+                ui::append(weak, "assistant", &text);
+            }
+            (text, result)
+        };
 
         if text.is_empty() && result.tool_calls.is_empty() {
             bail!("réponse du modèle sans contenu utilisable");
         }
-        convo.push(Message::new_ai_message_with_tool_calls(&text, &result.tool_calls));
+        convo.push(Message::new_ai_message_with_tool_calls(
+            &text,
+            &result.tool_calls,
+        ));
 
-        let Some(session) = session else {
-            if !result.tool_calls.is_empty() {
-                ui::append(weak, "error", "le modèle veut appeler un outil mais le serveur MCP est indisponible");
-            }
-            break;
-        };
         if result.tool_calls.is_empty() {
             break;
         }
 
+        let mut details_row = None;
+        let mut details = String::new();
+        let mut awaiting_choice = false;
         for tc in result.tool_calls {
-            ui::set_status(weak, format!("{} {}…", translations.label_tool, tc.name));
-            ui::append(weak, "tool", format!("→ {}({})", tc.name, compact_args(&tc.arguments)));
-            let args = parse_tool_arguments(&tc.arguments);
-            let call = session.call(&tc.name, args);
-            let out = match tokio::time::timeout(TIMEOUT_TOOL, call).await {
-                Ok(Ok(o)) => o,
-                Ok(Err(e)) => format!("erreur outil : {e:#}"),
-                Err(_) => format!("outil {} : timeout après 30 s", tc.name),
+            let out = if awaiting_choice {
+                json!({"status": "deferred", "reason": "awaiting_user_choice"}).to_string()
+            } else if tc.name == crate::choices::OFFER_TOOL {
+                match crate::choices::ChoiceRequest::parse(&tc.arguments) {
+                    Ok(request) => {
+                        ui::offer_choices(weak, request);
+                        awaiting_choice = true;
+                        json!({"status": "awaiting_user_choice", "instruction": "Wait for the user's click; do not choose for them."}).to_string()
+                    }
+                    Err(error) => json!({"error": error.to_string()}).to_string(),
+                }
+            } else {
+                let row = *details_row.get_or_insert_with(|| ui::append(weak, "tool", ""));
+                ui::set_activity(weak, "tools");
+                ui::set_status(weak, &translations.status_tools);
+                if !details.is_empty() {
+                    details.push_str("\n\n");
+                }
+                details.push_str(&format!("→ {}({})", tc.name, compact_args(&tc.arguments)));
+                ui::set_row(weak, row, "tool", &details);
+                let out = if tc.name == crate::choices::PALETTE_TOOL {
+                    crate::choices::palette_catalog().to_string()
+                } else if let Some(session) = session {
+                    let args = parse_tool_arguments(&tc.arguments);
+                    let call = session.call(&tc.name, args);
+                    match tokio::time::timeout(TIMEOUT_TOOL, call).await {
+                        Ok(Ok(o)) => o,
+                        Ok(Err(e)) => format!("erreur outil : {e:#}"),
+                        Err(_) => format!("outil {} : timeout après 30 s", tc.name),
+                    }
+                } else {
+                    translations.mcp_unavailable.clone()
+                };
+                details.push('\n');
+                details.push_str(&out);
+                ui::set_row(weak, row, "tool", &details);
+                out
             };
-            ui::append(weak, "tool", truncate_str(&out, 400));
+            // Tous les tool_use reçoivent un résultat, même ceux différés par le choix.
             convo.push(Message::new_tool_message(&out, tc.id.clone()));
+        }
+        if awaiting_choice {
+            break;
         }
     }
     Ok(())
@@ -462,28 +546,68 @@ async fn stream_turn(
     let mut stream = llm.generate_stream(convo);
     let mut text = String::new();
     let mut bubble_created = false;
+    let mut writing = false;
     let mut result: Option<GenerateResult> = None;
+    let mut last_flush = std::time::Instant::now();
+    let mut pending_text = false;
 
     loop {
-        let next = tokio::time::timeout(TIMEOUT_LLM, stream.next())
-            .await
-            .map_err(|_| anyhow!("LLM : silence depuis {} s", TIMEOUT_LLM.as_secs()))?;
+        let next = match tokio::time::timeout(TIMEOUT_LLM, stream.next()).await {
+            Ok(next) => next,
+            Err(_) => {
+                if pending_text {
+                    ui::update_last(weak, "assistant", &text);
+                }
+                return Err(anyhow!("LLM : silence depuis {} s", TIMEOUT_LLM.as_secs()));
+            }
+        };
         let Some(event) = next else { break };
-        match event.context("flux LLM")? {
+        let event = match event.context("flux LLM") {
+            Ok(event) => event,
+            Err(error) => {
+                if pending_text {
+                    ui::update_last(weak, "assistant", &text);
+                }
+                return Err(error);
+            }
+        };
+        match event {
             LLMEvent::Text(chunk) => {
-                if !bubble_created {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if !writing {
+                    writing = true;
+                    ui::set_activity(weak, "writing");
+                }
+                let first_chunk = !bubble_created;
+                if first_chunk {
                     bubble_created = true;
                     ui::append(weak, "assistant", "");
                 }
                 text.push_str(&chunk);
-                ui::update_last(weak, "assistant", &text);
+                pending_text = true;
+                if first_chunk || last_flush.elapsed() >= Duration::from_millis(33) {
+                    ui::update_last(weak, "assistant", &text);
+                    pending_text = false;
+                    last_flush = std::time::Instant::now();
+                }
             }
-            LLMEvent::Thinking(_) => {}
+            LLMEvent::Thinking(_) => {
+                if writing {
+                    writing = false;
+                    ui::set_activity(weak, "thinking");
+                }
+            }
             LLMEvent::Done(r) => result = Some(r),
             _ => {}
         }
     }
 
+    // Toujours vider le dernier fragment, même sur une interruption du flux.
+    if pending_text {
+        ui::update_last(weak, "assistant", &text);
+    }
     let result = result.context("flux terminé sans résultat final")?;
     if bubble_created && text.is_empty() {
         // bulle créée puis restée vide (tour outils sans texte) : on la retire
@@ -526,11 +650,26 @@ mod tests {
 
     #[test]
     fn classification_pieces() {
-        assert_eq!(classify_attachment(Path::new("/x/a.png")), AttachmentKind::Image);
-        assert_eq!(classify_attachment(Path::new("/x/A.JPG")), AttachmentKind::Image);
-        assert_eq!(classify_attachment(Path::new("/x/hyprland.lua")), AttachmentKind::Text);
-        assert_eq!(classify_attachment(Path::new("/x/doc.pdf")), AttachmentKind::Unsupported);
-        assert_eq!(classify_attachment(Path::new("/x/sans-ext")), AttachmentKind::Unsupported);
+        assert_eq!(
+            classify_attachment(Path::new("/x/a.png")),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            classify_attachment(Path::new("/x/A.JPG")),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            classify_attachment(Path::new("/x/hyprland.lua")),
+            AttachmentKind::Text
+        );
+        assert_eq!(
+            classify_attachment(Path::new("/x/doc.pdf")),
+            AttachmentKind::Unsupported
+        );
+        assert_eq!(
+            classify_attachment(Path::new("/x/sans-ext")),
+            AttachmentKind::Unsupported
+        );
     }
 
     #[test]
@@ -584,7 +723,10 @@ mod tests {
     #[test]
     fn arguments_outil_parses_ou_recuperees() {
         let m = parse_tool_arguments(r#"{"option":"general:gaps_in","value":"12"}"#);
-        assert_eq!(m.get("option").and_then(Value::as_str), Some("general:gaps_in"));
+        assert_eq!(
+            m.get("option").and_then(Value::as_str),
+            Some("general:gaps_in")
+        );
         let m = parse_tool_arguments("{json cassé");
         assert!(m.contains_key("__arguments_bruts"));
     }

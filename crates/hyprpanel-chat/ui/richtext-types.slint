@@ -1,0 +1,7 @@
+export struct RichCellRow { content: styled-text }
+export struct RichTableRow { header: bool, cells: [RichCellRow] }
+export struct RichBlockRow {
+    kind: string, level: int, indent: int, marker: string,
+    text: string, content: styled-text, language: string,
+    rows: [RichTableRow],
+}

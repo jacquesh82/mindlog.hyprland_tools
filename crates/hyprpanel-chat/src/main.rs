@@ -3,9 +3,13 @@
 //! exécution des outils du daemon via MCP.
 
 mod agent;
+mod avatar;
 mod chat_config;
+mod choices;
 mod i18n;
 mod mcp;
+mod providers;
+mod rich_text;
 mod ui;
 
 use anyhow::Context;
@@ -20,12 +24,22 @@ USAGE
   hyprpanel-chat init      Crée ~/.config/hyprpanel/chat.toml (clé reprise de
                            la config Zcode si disponible) et affiche l'état
   hyprpanel-chat --help    Cette aide
+  hyprpanel-chat check-providers [--live]
+                           Vérifie les connexions ; --live teste les trois
+                           abonnements et les choix sans modifier le bureau
 ";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("init") => return cmd_init(),
+        Some("check-providers") => {
+            let cfg = chat_config::ChatConfig::load().map_err(anyhow::Error::msg)?;
+            return tokio::runtime::Runtime::new()?.block_on(providers::diagnose(
+                &cfg,
+                args.iter().any(|a| a == "--live"),
+            ));
+        }
         Some("--help") | Some("-h") | Some("help") => {
             print!("{USAGE}");
             return Ok(());
@@ -41,7 +55,10 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("configuration du chat : {e}"))?;
 
     let app = ChatWindow::new().context("création de la fenêtre (session Wayland active ?)")?;
-    app.set_model_label(cfg.model.clone().into());
+    avatar::install(&app);
+    app.set_provider_index(cfg.provider.index());
+    app.set_model_label(cfg.model_label().into());
+    app.set_animations_enabled(cfg.animate_avatar);
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_tr(i18n::tr(cfg.lang()).to_slint());
     {
@@ -79,23 +96,63 @@ fn main() -> anyhow::Result<()> {
         let tx_reset = tx.clone();
         let tx_restore = tx.clone();
         let tx_cfg = tx.clone();
+        let tx_choice = tx.clone();
+        let weak_choice = app.as_weak();
+        app.on_choice_selected(move |index, id| {
+            let Some(app) = weak_choice.upgrade() else {
+                return;
+            };
+            if app.get_busy() || app.get_overlay() != "none" {
+                return;
+            }
+            let Some((display, context)) = choices::select_choice(&app, index, &id) else {
+                return;
+            };
+            app.set_activity("thinking".into());
+            app.set_busy(true);
+            app.set_follow_output(true);
+            if let Err(error) = tx_choice.send(agent::UserEvent::Choice { display, context }) {
+                app.set_busy(false);
+                ui::append(&weak_choice, "error", error.to_string());
+            }
+        });
+        app.on_open_source(move |url| {
+            if rich_text::safe_link(url.as_str()) {
+                let url = url.to_string();
+                std::thread::spawn(move || {
+                    let _ = std::process::Command::new("xdg-open").arg(url).status();
+                });
+            }
+        });
 
         let files_for_send = pending_files.clone();
         let weak_send = app.as_weak();
         app.on_send(move |text| {
-            let Some(app) = weak_send.upgrade() else { return };
+            let Some(app) = weak_send.upgrade() else {
+                return;
+            };
             if app.get_busy() {
                 return;
             }
-            let files: Vec<_> = std::mem::take(&mut *files_for_send.lock().expect("pièces empoisonnées"));
+            let files: Vec<_> =
+                std::mem::take(&mut *files_for_send.lock().expect("pièces empoisonnées"));
             if text.trim().is_empty() && files.is_empty() {
                 return;
             }
+            choices::finish_pending_choices(&app);
+            app.set_activity("thinking".into());
             app.set_busy(true);
             ui::attachments_clear(&weak_send);
-            if let Err(error) = tx_send.send(agent::UserEvent::Input { text: text.trim().to_string(), files }) {
+            if let Err(error) = tx_send.send(agent::UserEvent::Input {
+                text: text.trim().to_string(),
+                files,
+            }) {
                 app.set_busy(false);
-                ui::append(&weak_send, "error", format!("{} : {error}", app.get_tr().label_error));
+                ui::append(
+                    &weak_send,
+                    "error",
+                    format!("{} : {error}", app.get_tr().label_error),
+                );
             }
         });
 
@@ -120,6 +177,34 @@ fn main() -> anyhow::Result<()> {
         // ── Réglages ────────────────────────────────────────────────────
         let weak_settings = app.as_weak();
         let cfg_for_settings = std::sync::Arc::new(std::sync::Mutex::new(cfg.clone()));
+        let cfg_for_provider = cfg_for_settings.clone();
+        let tx_provider = tx.clone();
+        let weak_provider = app.as_weak();
+        app.on_provider_selected(move |index| {
+            let Some(app) = weak_provider.upgrade() else {
+                return;
+            };
+            let mut saved = cfg_for_provider.lock().expect("cfg empoisonnée");
+            if app.get_busy() {
+                app.set_provider_index(saved.provider.index());
+                return;
+            }
+            let Some(provider) = chat_config::Provider::from_index(index) else {
+                return;
+            };
+            let mut next = saved.clone();
+            next.provider = provider;
+            if let Err(error) = next.save() {
+                app.set_provider_index(saved.provider.index());
+                ui::append(&weak_provider, "error", format!("config : {error}"));
+                return;
+            }
+            app.set_provider_index(provider.index());
+            app.set_model_label(next.model_label().into());
+            let _ = tx_provider.send(agent::UserEvent::ConfigUpdated(Box::new(next.clone())));
+            *saved = next;
+            app.invoke_focus_composer();
+        });
         let cfg_for_open = cfg_for_settings.clone();
         app.on_open_settings(move || {
             let weak = weak_settings.clone();
@@ -127,10 +212,11 @@ fn main() -> anyhow::Result<()> {
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(app) = weak.upgrade() else { return };
                 app.set_cfg_lang_index(if cfg.lang() == i18n::Lang::En { 1 } else { 0 });
-                app.set_cfg_model(cfg.model.clone().into());
+                app.set_cfg_model(cfg.active_model().into());
                 app.set_cfg_base_url(cfg.base_url.clone().into());
                 app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
                 app.set_cfg_api_key(cfg.api_key.clone().into());
+                app.set_cfg_animate_avatar(cfg.animate_avatar);
                 app.set_settings_error("".into());
                 app.set_overlay("settings".into());
             });
@@ -138,12 +224,21 @@ fn main() -> anyhow::Result<()> {
 
         let weak_save = app.as_weak();
         app.on_save_settings(move || {
-            let Some(app) = weak_save.upgrade() else { return };
+            let Some(app) = weak_save.upgrade() else {
+                return;
+            };
             let mut cfg = cfg_for_settings.lock().expect("cfg empoisonnée").clone();
-            cfg.language = if app.get_cfg_lang_index() == 1 { "en".into() } else { "fr".into() };
-            cfg.model = app.get_cfg_model().trim().to_string();
+            cfg.language = if app.get_cfg_lang_index() == 1 {
+                "en".into()
+            } else {
+                "fr".into()
+            };
+            cfg.animate_avatar = app.get_cfg_animate_avatar();
+            cfg.set_active_model(app.get_cfg_model().trim().to_string());
             cfg.base_url = app.get_cfg_base_url().trim().to_string();
-            if cfg.model.is_empty() || cfg.base_url.is_empty() {
+            if cfg.provider == chat_config::Provider::Zcode
+                && (cfg.model.is_empty() || cfg.base_url.is_empty())
+            {
                 app.set_settings_error(app.get_tr().settings_invalid.clone());
                 return;
             }
@@ -163,7 +258,8 @@ fn main() -> anyhow::Result<()> {
             match cfg.save() {
                 Ok(()) => {
                     *cfg_for_settings.lock().expect("cfg empoisonnée") = cfg.clone();
-                    app.set_model_label(cfg.model.clone().into());
+                    app.set_model_label(cfg.model_label().into());
+                    app.set_animations_enabled(cfg.animate_avatar);
                     let _ = tx_cfg.send(agent::UserEvent::ConfigUpdated(Box::new(cfg)));
                     app.set_overlay("none".into());
                     app.invoke_focus_composer();
@@ -204,7 +300,10 @@ fn main() -> anyhow::Result<()> {
                 let chosen = String::from_utf8_lossy(&out.stdout);
                 for line in chosen.lines().filter(|l| !l.is_empty()) {
                     let path = std::path::PathBuf::from(line);
-                    files_for_pick.lock().expect("pièces empoisonnées").push(path.clone());
+                    files_for_pick
+                        .lock()
+                        .expect("pièces empoisonnées")
+                        .push(path.clone());
                     let name = path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -230,7 +329,10 @@ fn main() -> anyhow::Result<()> {
     std::thread::Builder::new()
         .name("lyra-agent".into())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(rt) => rt,
                 Err(e) => {
                     eprintln!("runtime tokio : {e}");
@@ -252,7 +354,9 @@ fn cmd_init() -> anyhow::Result<()> {
             if created {
                 println!("configuration créée : {}", path.display());
                 if cfg.api_key.is_empty() {
-                    println!("api_key : absente (aucune clé Z.ai trouvée) — renseignez-la dans le fichier");
+                    println!(
+                        "api_key : absente (aucune clé Z.ai trouvée) — renseignez-la dans le fichier"
+                    );
                 } else {
                     println!("api_key : reprise de la config Zcode (non affichée)");
                 }

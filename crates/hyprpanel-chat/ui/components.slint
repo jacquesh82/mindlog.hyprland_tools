@@ -1,4 +1,5 @@
 import { Button } from "std-widgets.slint";
+import { SwatchRow } from "choice-types.slint";
 
 export global Theme {
     out property <color> canvas: #101319;
@@ -11,10 +12,40 @@ export global Theme {
     out property <color> accent: #7BDACD;
 }
 
-export component Avatar inherits Image {
-    source: @image-url("../assets/lyra-avatar.png");
-    image-fit: contain;
+export global AvatarFrames {
+    in-out property <image> open;
+    in-out property <image> blink;
+}
+
+export component Avatar inherits Rectangle {
+    in property <bool> animated: false;
+    in property <bool> engaged: false;
+    in property <bool> blink-enabled: true;
+    // Horloge commune limitée à 20 Hz par la fenêtre, sans animation-tick().
+    in property <float> time-override: 0;
+    min-width: 0px;
+    min-height: 0px;
+    preferred-width: 40px;
+    preferred-height: 40px;
     accessible-role: none;
+    private property <float> seconds: root.animated ? root.time-override : 0;
+    private property <float> blink-cycle: Math.mod(root.seconds, 7.3);
+    private property <bool> closed: root.animated && root.blink-enabled && ((blink-cycle > 4.8 && blink-cycle < 4.94) || (blink-cycle > 5.16 && blink-cycle < 5.28));
+    Image {
+        // Déplacement local de quelques pixels, y compris avec le renderer
+        // logiciel Slint qui ignore rotation/scale ; le layout externe est fixe.
+        x: root.animated ? Math.sin(root.seconds / 6.8 * 360deg) * parent.width * 0.008 : 0px;
+        y: root.animated ? Math.sin(root.seconds / 4.2 * 360deg) * parent.height * 0.012 : 0px;
+        width: parent.width;
+        height: parent.height;
+        source: root.closed ? AvatarFrames.blink : AvatarFrames.open;
+        image-fit: contain;
+        transform-origin: { x: self.width / 2, y: self.height * 0.7 };
+        transform-rotation: root.animated ? Math.sin(root.seconds / 6.8 * 360deg) * (root.engaged ? 2deg : 1.2deg) : 0deg;
+        transform-scale-x: root.animated ? 100% + Math.sin(root.seconds / 4.2 * 360deg) * 0.7% : 100%;
+        transform-scale-y: root.animated ? 100% + Math.sin(root.seconds / 4.2 * 360deg) * 1.4% : 100%;
+        accessible-role: none;
+    }
 }
 
 // Les boutons standard conservent navigation clavier, focus et sémantique.
@@ -25,6 +56,9 @@ export component ActionButton inherits Rectangle {
     in property <image> icon;
     in property <bool> enabled: true;
     in property <bool> primary: false;
+    in property <bool> link: false;
+    in property <bool> expandable: false;
+    in property <bool> expanded: false;
     callback clicked();
     in property <bool> icon-only: false;
     in property <bool> filled: false;
@@ -53,7 +87,7 @@ export component ActionButton inherits Rectangle {
             }
             if !root.icon-only: Text {
                 text: root.text;
-                color: !root.enabled ? Theme.muted : root.primary ? #102C2A : Theme.text;
+                color: !root.enabled ? Theme.muted : root.primary ? #102C2A : root.link ? Theme.accent : Theme.text;
                 font-size: 13px;
                 font-weight: 500;
                 vertical-alignment: center;
@@ -69,12 +103,147 @@ export component ActionButton inherits Rectangle {
             opacity: 0;
             text: root.text;
             accessible-label: root.a11y-label == "" ? root.text : root.a11y-label;
+            accessible-expandable: root.expandable;
+            accessible-expanded: root.expanded;
             enabled: root.enabled;
-            clicked => { root.clicked(); }
+            clicked => {
+                control.focus();
+                root.clicked();
+            }
         }
     }
     if root.icon-only: Tooltip {
         Text { text: root.text; color: Theme.text; font-size: 13px; }
+    }
+}
+
+export component ToolDetails inherits Rectangle {
+    in property <string> details;
+    in property <string> show-label;
+    in property <string> hide-label;
+    private property <bool> expanded: false;
+    callback toggled();
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 8px;
+        ActionButton {
+            text: (root.expanded ? "▾ " : "▸ ") + (root.expanded ? root.hide-label : root.show-label);
+            height: 32px;
+            link: true;
+            expandable: true;
+            expanded: root.expanded;
+            clicked => {
+                root.toggled();
+                root.expanded = !root.expanded;
+            }
+        }
+        if root.expanded: Rectangle {
+            height: details-text.preferred-height + 24px;
+            border-radius: 10px;
+            background: Theme.panel;
+            border-width: 1px;
+            border-color: Theme.border;
+            details-text := Text {
+                x: 12px; y: 12px;
+                width: parent.width - 24px;
+                text: root.details;
+                color: Theme.secondary;
+                font-size: 12px;
+                font-family: "monospace";
+                wrap: word-wrap;
+            }
+        }
+    }
+}
+
+export component ChoiceCard inherits Rectangle {
+    in property <string> label;
+    in property <string> description;
+    in property <[SwatchRow]> swatches;
+    in property <string> colors-text;
+    in property <image> preview;
+    in property <bool> preview-missing;
+    in property <string> missing-label;
+    in property <string> source;
+    in property <string> source-label;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback invoked();
+    callback source-clicked();
+    height: content.preferred-height;
+    content := VerticalLayout {
+        spacing: 2px;
+        Rectangle {
+            height: details.preferred-height + 28px;
+            border-radius: 12px;
+            background: root.selected ? #1C323B : hover.has-hover && root.enabled ? #202B35 : Theme.panel;
+            border-width: 1px;
+            border-color: root.selected || control.has-focus ? Theme.accent : Theme.border;
+            details := VerticalLayout {
+                x: 16px; y: 14px;
+                width: parent.width - 32px;
+                height: self.preferred-height;
+                spacing: 8px;
+                Text {
+                    text: (root.selected ? "✓  " : "") + root.label;
+                    color: root.selected ? Theme.accent : Theme.text;
+                    font-size: 14px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+                if root.description != "": Text {
+                    text: root.description;
+                    color: Theme.secondary;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                }
+                if root.swatches.length > 0: HorizontalLayout {
+                    height: 36px;
+                    spacing: 4px;
+                    for swatch in root.swatches: Rectangle {
+                        background: swatch.paint;
+                        border-radius: 5px;
+                        horizontal-stretch: 1;
+                    }
+                }
+                if root.colors-text != "": Text {
+                    text: root.colors-text;
+                    color: Theme.muted;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+                if root.preview.width > 0: Image {
+                    height: 140px;
+                    source: root.preview;
+                    image-fit: contain;
+                }
+                if root.preview-missing: Text {
+                    text: root.missing-label;
+                    color: #F3A9B7;
+                    font-size: 12px;
+                }
+            }
+            hover := TouchArea {
+                enabled: root.enabled;
+                mouse-cursor: pointer;
+                control := Button {
+                    width: parent.width; height: parent.height;
+                    opacity: 0;
+                    text: root.label + ". " + root.description + " " + root.colors-text;
+                    accessible-checkable: true;
+                    accessible-checked: root.selected;
+                    enabled: root.enabled;
+                    clicked => { root.invoked(); }
+                }
+            }
+        }
+        if root.source != "": ActionButton {
+            text: root.source-label + " ↗";
+            a11y-label: root.source;
+            link: true;
+            height: 28px;
+            clicked => { root.source-clicked(); }
+        }
     }
 }
 

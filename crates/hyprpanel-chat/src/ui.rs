@@ -30,8 +30,14 @@ pub fn append(weak: &Weak<ChatWindow>, kind: &str, text: impl Into<String>) -> u
     let idx = ROWS.fetch_add(1, Ordering::SeqCst);
     let kind = kind.to_string();
     let text = text.into();
-    queue(weak, move |_, model| {
-        model.push(MessageRow { kind: kind.into(), text: text.into() });
+    let rich = (kind == "assistant").then(|| crate::rich_text::parse(&text));
+    queue(weak, move |ui, model| {
+        if kind == "user" {
+            ui.set_follow_output(true);
+        }
+        let mut row = MessageRow { kind: kind.into(), text: text.into(), ..Default::default() };
+        if let Some(rich) = rich { rich.apply(&mut row); }
+        model.push(row);
     });
     idx
 }
@@ -45,9 +51,12 @@ pub fn update_last(weak: &Weak<ChatWindow>, kind: &str, text: &str) {
 pub fn set_row(weak: &Weak<ChatWindow>, idx: usize, kind: &str, text: &str) {
     let kind = kind.to_string();
     let text = text.to_string();
+    let rich = (kind == "assistant").then(|| crate::rich_text::parse(&text));
     queue(weak, move |_, model| {
         if idx < model.row_count() {
-            model.set_row_data(idx, MessageRow { kind: kind.into(), text: text.into() });
+            let mut row = MessageRow { kind: kind.into(), text: text.into(), ..Default::default() };
+            if let Some(rich) = rich { rich.apply(&mut row); }
+            model.set_row_data(idx, row);
         }
     });
 }
@@ -65,10 +74,21 @@ pub fn remove_last(weak: &Weak<ChatWindow>) {
 /// Vide le journal (nouvelle conversation).
 pub fn clear(weak: &Weak<ChatWindow>) {
     ROWS.store(0, Ordering::SeqCst);
-    queue(weak, |_, model| {
+    queue(weak, |ui, model| {
+        ui.set_follow_output(true);
         model.set_vec(Vec::new());
     });
 }
+
+pub fn offer_choices(weak: &Weak<ChatWindow>, request: crate::choices::ChoiceRequest) {
+    ROWS.fetch_add(1, Ordering::SeqCst);
+    queue(weak, move |ui, model| {
+        crate::choices::finish_pending_choices(ui);
+        ui.invoke_prepare_choice();
+        model.push(request.to_row());
+    });
+}
+
 
 pub fn set_status(weak: &Weak<ChatWindow>, status: impl Into<String>) {
     let status = status.into();
@@ -85,6 +105,16 @@ pub fn set_busy(weak: &Weak<ChatWindow>, busy: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_busy(busy);
+        }
+    });
+}
+
+pub fn set_activity(weak: &Weak<ChatWindow>, activity: &str) {
+    let weak = weak.clone();
+    let activity = activity.to_string();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_activity(activity.into());
         }
     });
 }

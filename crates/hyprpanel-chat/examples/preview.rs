@@ -2,14 +2,20 @@
 //! cargo run -p hyprpanel-chat --example preview --offline
 //! Les captures et vérifications d'interaction vont dans target/lyra-previews.
 
+#[path = "../src/avatar.rs"]
+mod avatar;
+#[path = "../src/choices.rs"]
+mod choices;
 #[path = "../src/i18n.rs"]
 mod i18n;
+#[path = "../src/rich_text.rs"]
+mod rich_text;
 
 use std::{cell::RefCell, path::Path, rc::Rc, time::Instant};
 
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
-use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedPixelBuffer, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, SharedPixelBuffer, VecModel};
 
 slint::include_modules!();
 
@@ -29,18 +35,32 @@ impl Platform for PreviewPlatform {
 }
 
 fn snapshot(
+    app: &ChatWindow,
     window: &MinimalSoftwareWindow,
     path: &Path,
     width: u32,
     height: u32,
 ) -> anyhow::Result<()> {
     window.set_size(PhysicalSize::new(width, height));
-    slint::platform::update_timers_and_animations();
-    window.request_redraw();
+    let messages = app.get_messages();
+    for index in 0..messages.row_count() {
+        if let Some(mut row) = messages.row_data(index) {
+            if row.kind == "assistant" && row.html.is_empty() {
+                rich_text::parse(&row.text).apply(&mut row);
+                messages.set_row_data(index, row);
+            }
+        }
+    }
     let mut pixels = SharedPixelBuffer::<slint::Rgb8Pixel>::new(width, height);
-    window.draw_if_needed(|renderer| {
-        renderer.render(pixels.make_mut_slice(), width as usize);
-    });
+    // Donner aux callbacks de géométrie et au suivi du streaming un tour de boucle.
+    for _ in 0..3 {
+        slint::platform::update_timers_and_animations();
+        window.request_redraw();
+        window.draw_if_needed(|renderer| {
+            renderer.render(pixels.make_mut_slice(), width as usize);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(3));
+    }
     image::save_buffer(
         path,
         pixels.as_bytes(),
@@ -78,6 +98,8 @@ fn main() -> anyhow::Result<()> {
         started: Instant::now(),
     }))?;
     let app = ChatWindow::new()?;
+    avatar::install(&app);
+    app.set_animations_enabled(false);
     app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
     app.set_status("MCP : 20 outils".into());
     app.set_model_label("GLM-5.3".into());
@@ -90,6 +112,19 @@ fn main() -> anyhow::Result<()> {
     let sent = Rc::new(RefCell::new(Vec::new()));
     let sent_callback = sent.clone();
     app.on_send(move |text| sent_callback.borrow_mut().push(text.to_string()));
+    let opened_links = Rc::new(RefCell::new(Vec::new()));
+    let opened_callback = opened_links.clone();
+    app.on_open_source(move |url| opened_callback.borrow_mut().push(url.to_string()));
+    let selections = Rc::new(RefCell::new(Vec::new()));
+    let selected_callback = selections.clone();
+    let weak = app.as_weak();
+    app.on_choice_selected(move |index, id| {
+        if let Some(app) = weak.upgrade() {
+            if let Some((_, context)) = choices::select_choice(&app, index, &id) {
+                selected_callback.borrow_mut().push(context);
+            }
+        }
+    });
     let weak = app.as_weak();
     app.on_close_overlay(move || {
         if let Some(app) = weak.upgrade() {
@@ -105,22 +140,28 @@ fn main() -> anyhow::Result<()> {
     });
     app.show()?;
 
-    snapshot(&window, &out.join("welcome-desktop.png"), 1080, 800)?;
-    snapshot(&window, &out.join("welcome-wide.png"), 1366, 768)?;
-    snapshot(&window, &out.join("welcome-compact.png"), 480, 720)?;
-    snapshot(&window, &out.join("welcome-minimum.png"), 480, 600)?;
+    snapshot(&app, &window, &out.join("welcome-desktop.png"), 1080, 800)?;
+    snapshot(&app, &window, &out.join("welcome-wide.png"), 1366, 768)?;
+    snapshot(&app, &window, &out.join("welcome-compact.png"), 480, 720)?;
+    snapshot(&app, &window, &out.join("welcome-minimum.png"), 480, 600)?;
     app.set_tr(i18n::tr(i18n::Lang::En).to_slint());
-    snapshot(&window, &out.join("welcome-english.png"), 1080, 800)?;
+    snapshot(&app, &window, &out.join("welcome-english.png"), 1080, 800)?;
     app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
 
     messages.set_vec(vec![
-        MessageRow { kind: "user".into(), text: "Peux-tu rendre mon bureau un peu plus aéré ?".into() },
-        MessageRow { kind: "assistant".into(), text: "Bien sûr. Je vais essayer des espaces de 10 pixels entre vos fenêtres. Vous pourrez vérifier le résultat avant de conserver ce réglage.".into() },
-        MessageRow { kind: "tool".into(), text: "hypr_set_option_live · general:gaps_in → 10\nAperçu appliqué. La configuration enregistrée est conservée.".into() },
-        MessageRow { kind: "assistant".into(), text: "Voilà, votre bureau respire un peu plus. Souhaitez-vous conserver ce réglage ou revenir à la disposition précédente ?".into() },
+        MessageRow { kind: "user".into(), text: "Peux-tu rendre mon bureau un peu plus aéré ?".into(), ..Default::default() },
+        MessageRow { kind: "assistant".into(), text: "Bien sûr. Je vais essayer des espaces de 10 pixels entre vos fenêtres. Vous pourrez vérifier le résultat avant de conserver ce réglage.".into(), ..Default::default() },
+        MessageRow { kind: "tool".into(), text: "hypr_set_option_live · general:gaps_in → 10\nAperçu appliqué. La configuration enregistrée est conservée.".into(), ..Default::default() },
+        MessageRow { kind: "assistant".into(), text: "Voilà, votre bureau respire un peu plus. Souhaitez-vous conserver ce réglage ou revenir à la disposition précédente ?".into(), ..Default::default() },
     ]);
-    snapshot(&window, &out.join("conversation.png"), 1080, 800)?;
-    snapshot(&window, &out.join("conversation-compact.png"), 480, 720)?;
+    snapshot(&app, &window, &out.join("conversation.png"), 1080, 800)?;
+    snapshot(
+        &app,
+        &window,
+        &out.join("conversation-compact.png"),
+        480,
+        720,
+    )?;
     messages.set_vec(Vec::new());
     attachments.push(AttachmentRow {
         name: "hyprland.lua".into(),
@@ -131,7 +172,7 @@ fn main() -> anyhow::Result<()> {
         meta: "240 Ko · image".into(),
     });
     app.set_draft("Voici ma configuration actuelle.".into());
-    snapshot(&window, &out.join("attachments.png"), 1080, 800)?;
+    snapshot(&app, &window, &out.join("attachments.png"), 1080, 800)?;
     attachments.set_vec(Vec::new());
     app.set_draft("".into());
 
@@ -149,11 +190,17 @@ fn main() -> anyhow::Result<()> {
     });
     for panel in ["help", "settings", "history"] {
         app.set_overlay(panel.into());
-        snapshot(&window, &out.join(format!("{panel}.png")), 1080, 800)?;
-        snapshot(&window, &out.join(format!("{panel}-compact.png")), 480, 600)?;
+        snapshot(&app, &window, &out.join(format!("{panel}.png")), 1080, 800)?;
+        snapshot(
+            &app,
+            &window,
+            &out.join(format!("{panel}-compact.png")),
+            480,
+            600,
+        )?;
     }
     app.set_overlay("none".into());
-    snapshot(&window, &out.join("interaction-start.png"), 1080, 800)?;
+    snapshot(&app, &window, &out.join("interaction-start.png"), 1080, 800)?;
 
     // Une suggestion prépare le brouillon, sans déclencher d'action Hyprland.
     click(&app, 300., 410.);
@@ -209,7 +256,7 @@ fn main() -> anyhow::Result<()> {
         1,
         "activer une carte prépare le message"
     );
-    snapshot(&window, &out.join("draft-ready.png"), 1080, 800)?;
+    snapshot(&app, &window, &out.join("draft-ready.png"), 1080, 800)?;
 
     app.set_draft("".into());
     app.set_busy(true);
@@ -220,11 +267,20 @@ fn main() -> anyhow::Result<()> {
     );
     app.set_busy(false);
     app.set_overlay("settings".into());
-    snapshot(&window, &out.join("settings.png"), 1080, 800)?;
+    snapshot(&app, &window, &out.join("settings.png"), 1080, 800)?;
     click(&app, 540., 600.);
-    assert_eq!(app.get_overlay().as_str(), "settings", "un clic dans le panneau ne doit pas le fermer");
+    assert_eq!(
+        app.get_overlay().as_str(),
+        "settings",
+        "un clic dans le panneau ne doit pas le fermer"
+    );
     // Une édition doit modifier la propriété lue par le bouton Enregistrer.
-    click(&app, 450., 296.);
+    click(&app, 295., 265.);
+    assert!(
+        !app.get_cfg_animate_avatar(),
+        "la préférence d’animation doit être modifiable"
+    );
+    click(&app, 450., 322.);
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
     });
@@ -250,7 +306,13 @@ fn main() -> anyhow::Result<()> {
     );
     app.set_cfg_model("GLM-5.3".into());
     app.set_settings_error(app.get_tr().settings_invalid);
-    snapshot(&window, &out.join("settings-validation.png"), 1080, 800)?;
+    snapshot(
+        &app,
+        &window,
+        &out.join("settings-validation.png"),
+        1080,
+        800,
+    )?;
     app.set_settings_error("".into());
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Escape.into(),
@@ -263,6 +325,436 @@ fn main() -> anyhow::Result<()> {
     app.window().dispatch_event(WindowEvent::KeyReleased {
         text: slint::platform::Key::Escape.into(),
     });
+    // Le Markdown est converti en HTML et en blocs natifs, avant comme pendant le streaming.
+    app.set_overlay("none".into());
+    app.set_follow_output(false);
+    let formatted = "# Votre bureau, plus lisible\n\nDu **gras**, de l’*italique*, du `code en ligne` et un [lien Hyprland](https://wiki.hypr.land).\n\n## Les réglages proposés\n\n- **Espacement** : 10 pixels entre les fenêtres.\n- **Bordures** : un accent cyan discret.\n  - Les écrans restent inchangés.\n\n> Ces changements sont d’abord proposés à chaud.\n\n```lua\nhl.config({\n    general = { gaps_in = 10 },\n})\n```\n\n| Réglage | Avant | Après |\n|---|---|---|\n| Gaps | 5 px | **10 px** |\n| Bordures | 1 px | **2 px** |\n\n1. Essayer les réglages.\n2. Conserver uniquement si le résultat vous plaît.\n";
+    messages.set_vec(vec![MessageRow {
+        kind: "assistant".into(),
+        text: formatted.into(),
+        ..Default::default()
+    }]);
+    snapshot(&app, &window, &out.join("rich-response.png"), 1080, 1000)?;
+    let row = messages.row_data(0).unwrap();
+    assert!(row.html.contains("<h1>"));
+    assert!(row.rich_blocks.iter().any(|block| block.kind == "table"));
+    click(&app, 520., 194.);
+    assert!(
+        opened_links
+            .borrow()
+            .iter()
+            .any(|url| url == "https://wiki.hypr.land"),
+        "le lien du contenu mis en forme doit être cliquable"
+    );
+    snapshot(
+        &app,
+        &window,
+        &out.join("rich-response-compact.png"),
+        480,
+        800,
+    )?;
+    app.set_follow_output(true);
+    app.invoke_scroll_bottom();
+    snapshot(
+        &app,
+        &window,
+        &out.join("rich-response-bottom.png"),
+        480,
+        800,
+    )?;
+    assert!(
+        app.invoke_is_at_bottom(),
+        "le texte mis en forme conserve le suivi du scroll"
+    );
+
+    // Captures enregistrées à des instants précis : respiration, tête et paupières.
+    messages.set_vec(Vec::new());
+    app.invoke_scroll_bottom();
+    app.set_animations_enabled(true);
+    app.set_avatar_time(0.);
+    snapshot(&app, &window, &out.join("avatar-open.png"), 1080, 800)?;
+    app.set_avatar_time(1.05);
+    snapshot(&app, &window, &out.join("avatar-breath.png"), 1080, 800)?;
+    app.set_avatar_time(4.86);
+    snapshot(&app, &window, &out.join("avatar-blink.png"), 1080, 800)?;
+    let avatar_pixels = |name: &str| -> anyhow::Result<Vec<u8>> {
+        Ok(image::open(out.join(name))?
+            .crop_imm(480, 100, 120, 130)
+            .to_rgba8()
+            .into_raw())
+    };
+    assert!(avatar_pixels("avatar-open.png")? != avatar_pixels("avatar-blink.png")?);
+    assert!(
+        avatar_pixels("avatar-open.png")? != avatar_pixels("avatar-breath.png")?,
+        "la respiration doit aussi rester visible avec le rendu logiciel"
+    );
+    app.set_avatar_time(-1.);
+    snapshot(&app, &window, &out.join("avatar-live-a.png"), 1080, 800)?;
+    // Le timer avance au rythme de la vraie boucle d'événements (20 Hz).
+    let before = app.invoke_animation_time();
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        slint::platform::update_timers_and_animations();
+    }
+    snapshot(&app, &window, &out.join("avatar-live-b.png"), 1080, 800)?;
+    assert!(app.invoke_animation_time() > before + 0.2);
+    assert!(
+        avatar_pixels("avatar-live-a.png")? != avatar_pixels("avatar-live-b.png")?,
+        "l’horloge native doit animer la tête en temps réel"
+    );
+    app.set_animations_enabled(false);
+    app.set_avatar_time(0.);
+    snapshot(&app, &window, &out.join("avatar-disabled.png"), 1080, 800)?;
+    app.set_avatar_time(4.86);
+    snapshot(
+        &app,
+        &window,
+        &out.join("avatar-disabled-later.png"),
+        1080,
+        800,
+    )?;
+    assert!(
+        avatar_pixels("avatar-disabled.png")? == avatar_pixels("avatar-disabled-later.png")?,
+        "désactiver l’animation doit figer l’avatar"
+    );
+
+    // L'activité apparaît avant le premier mot, suit la phase, puis disparaît.
+    app.set_overlay("none".into());
+    app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+    messages.set_vec(vec![MessageRow {
+        kind: "user".into(),
+        text: "Propose-moi une ambiance pour mon bureau.".into(),
+        ..Default::default()
+    }]);
+    app.set_busy(true);
+    app.set_activity("thinking".into());
+    snapshot(&app, &window, &out.join("activity-thinking.png"), 1080, 800)?;
+    assert_eq!(app.invoke_activity_label(), app.get_tr().status_thinking);
+    messages.push(MessageRow {
+        kind: "assistant".into(),
+        text: "Je vous propose trois ambiances…".into(),
+        ..Default::default()
+    });
+    app.set_activity("writing".into());
+    snapshot(&app, &window, &out.join("activity-writing.png"), 1080, 800)?;
+    assert_eq!(app.invoke_activity_label(), app.get_tr().status_writing);
+    app.set_activity("tools".into());
+    snapshot(&app, &window, &out.join("activity-tools.png"), 480, 600)?;
+    assert_eq!(app.invoke_activity_label(), app.get_tr().status_tools);
+    app.set_tr(i18n::tr(i18n::Lang::En).to_slint());
+    app.set_activity("thinking".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("activity-thinking-english.png"),
+        1080,
+        800,
+    )?;
+    app.set_busy(false);
+    snapshot(&app, &window, &out.join("activity-complete.png"), 1080, 800)?;
+    app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+
+    // Régression : les fragments allongent une réponse au-delà du viewport.
+    app.set_overlay("none".into());
+    app.set_follow_output(true);
+    let paragraph =
+        "LYRA décrit le réglage en cours. Le texte doit rester visible pendant la génération.\n";
+    for step in 1..=5 {
+        let row = MessageRow {
+            kind: "assistant".into(),
+            text: paragraph.repeat(step * 45).into(),
+            ..Default::default()
+        };
+        if step == 1 {
+            messages.set_vec(vec![row]);
+        } else {
+            messages.set_row_data(0, row);
+        }
+        app.invoke_scroll_bottom();
+        snapshot(&app, &window, &out.join("streaming-bottom.png"), 1080, 800)?;
+        assert!(
+            app.invoke_scroll_overflow() > 0.,
+            "le scénario doit déborder"
+        );
+        assert!(
+            app.invoke_is_at_bottom(),
+            "fragment {step}: suivi={}, position={}, débordement={}",
+            app.get_follow_output(),
+            app.invoke_scroll_position(),
+            app.invoke_scroll_overflow()
+        );
+    }
+    snapshot(
+        &app,
+        &window,
+        &out.join("streaming-bottom-compact.png"),
+        480,
+        600,
+    )?;
+    assert!(
+        app.invoke_is_at_bottom(),
+        "le suivi doit résister au retour à la ligne après redimensionnement"
+    );
+
+    // Une lecture manuelle au-dessus suspend le suivi jusqu'au retour en bas.
+    app.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: slint::LogicalPosition::new(300., 200.),
+        delta_x: 0.,
+        delta_y: 250.,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(220));
+    snapshot(
+        &app,
+        &window,
+        &out.join("streaming-manual-scroll.png"),
+        480,
+        600,
+    )?;
+    assert!(
+        !app.get_follow_output(),
+        "la lecture de l'historique doit suspendre le suivi"
+    );
+    messages.set_row_data(
+        0,
+        MessageRow {
+            kind: "assistant".into(),
+            text: paragraph.repeat(250).into(),
+            ..Default::default()
+        },
+    );
+    app.invoke_scroll_bottom();
+    snapshot(
+        &app,
+        &window,
+        &out.join("streaming-manual-scroll.png"),
+        480,
+        600,
+    )?;
+    assert!(
+        !app.invoke_is_at_bottom(),
+        "un fragment ne doit pas interrompre la lecture manuelle"
+    );
+    app.window().dispatch_event(WindowEvent::PointerScrolled {
+        position: slint::LogicalPosition::new(300., 200.),
+        delta_x: 0.,
+        delta_y: -100_000.,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(220));
+    snapshot(&app, &window, &out.join("streaming-resumed.png"), 480, 600)?;
+    assert!(
+        app.invoke_is_at_bottom() && app.get_follow_output(),
+        "revenir en bas doit reprendre le suivi"
+    );
+
+    // Les détails restent fermés, puis s'ouvrent au clic et se ferment par Entrée.
+    messages.set_vec(vec![MessageRow {
+        kind: "tool".into(),
+        text: "hypr_monitors\nDP-1 : 2560 × 1440\n".repeat(35).into(),
+        ..Default::default()
+    }]);
+    snapshot(&app, &window, &out.join("tools-collapsed.png"), 1080, 800)?;
+    assert_eq!(app.invoke_scroll_overflow(), 0.);
+    click(&app, 250., 124.);
+    snapshot(&app, &window, &out.join("tools-expanded.png"), 1080, 800)?;
+    assert!(
+        app.invoke_scroll_overflow() > 0.,
+        "le clic doit révéler les détails"
+    );
+    let expanded_height = app.invoke_scroll_overflow();
+    messages.set_row_data(
+        0,
+        MessageRow {
+            kind: "tool".into(),
+            text: "Résultat détaillé\n".repeat(120).into(),
+            ..Default::default()
+        },
+    );
+    snapshot(&app, &window, &out.join("tools-expanded.png"), 1080, 800)?;
+    assert!(
+        app.invoke_scroll_overflow() > expanded_height,
+        "une mise à jour conserve le bloc ouvert"
+    );
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Return.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Return.into(),
+    });
+    snapshot(&app, &window, &out.join("tools-collapsed.png"), 1080, 800)?;
+    assert_eq!(app.invoke_scroll_overflow(), 0.);
+
+    // Palettes réelles du catalogue : source, clic, valeur exacte et double clic.
+    messages.set_vec(Vec::new());
+    let catalog = choices::palette_catalog();
+    let request = choices::ChoiceRequest::parse(&serde_json::json!({
+        "question": "Quelle ambiance préférez-vous pour votre bureau ?", "options": catalog["palettes"],
+    }).to_string())?;
+    app.invoke_prepare_choice();
+    messages.push(request.to_row());
+    snapshot(&app, &window, &out.join("choices-palettes.png"), 1080, 800)?;
+    app.invoke_choice_selected(0, "inconnu".into());
+    assert!(
+        selections.borrow().is_empty(),
+        "un identifiant inconnu est ignoré"
+    );
+    click(&app, 350., 185.);
+    assert_eq!(
+        selections.borrow().len(),
+        1,
+        "un clic doit transmettre le choix"
+    );
+    let selection: serde_json::Value = serde_json::from_str(&selections.borrow()[0])?;
+    assert_eq!(selection["id"], "graphite-cyan");
+    assert_eq!(selection["colors"][2], "#00ADB5");
+    app.invoke_choice_selected(0, "ocean".into());
+    assert_eq!(
+        selections.borrow().len(),
+        1,
+        "une proposition utilisée ne se renvoie pas"
+    );
+    snapshot(&app, &window, &out.join("choices-selected.png"), 1080, 800)?;
+
+    let request = choices::ChoiceRequest::parse(
+        r#"{"question":"Quel style de fenêtres souhaitez-vous ?","options":[{"id":"compact","label":"Compact","description":"Petits espaces, bordures discrètes","value":"gaps_in=4;rounding=4"},{"id":"airy","label":"Aéré","description":"Plus d’espace entre les fenêtres","value":"gaps_in=12;rounding=12"}]}"#,
+    )?;
+    messages.set_vec(vec![request.to_row()]);
+    snapshot(&app, &window, &out.join("choices-text.png"), 1080, 800)?;
+    choices::finish_pending_choices(&app);
+    assert_eq!(
+        messages.row_data(0).unwrap().choice_state.as_str(),
+        "skipped"
+    );
+    assert!(choices::select_choice(&app, 0, "airy").is_none());
+
+    let diagram = |vertical: bool| {
+        format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="360" height="180" viewBox="0 0 360 180"><rect width="360" height="180" rx="12" fill="#101319"/><rect x="{}" y="{}" width="130" height="65" rx="6" fill="#1C323B" stroke="#7BDACD" stroke-width="2"/><rect x="{}" y="{}" width="130" height="65" rx="6" fill="#24384B" stroke="#8BB6E8" stroke-width="2"/></svg>"##,
+            if vertical { 115 } else { 30 },
+            if vertical { 15 } else { 55 },
+            if vertical { 115 } else { 195 },
+            if vertical { 100 } else { 55 }
+        )
+    };
+    let request = choices::ChoiceRequest::parse(
+        &serde_json::json!({"question":"Comment disposer les écrans ?","options":[
+            {"id":"horizontal","label":"Côte à côte","value":"horizontal","svg":diagram(false)},
+            {"id":"vertical","label":"Superposés","value":"vertical","svg":diagram(true)}
+        ]})
+        .to_string(),
+    )?;
+    let row = request.to_row();
+    assert!(
+        row.choices.row_data(0).unwrap().preview.size().width > 0,
+        "le SVG doit être rendu"
+    );
+    messages.set_vec(vec![row]);
+    snapshot(&app, &window, &out.join("choices-diagrams.png"), 1080, 800)?;
+    snapshot(
+        &app,
+        &window,
+        &out.join("choices-diagrams-compact.png"),
+        480,
+        720,
+    )?;
+
+    let request = choices::ChoiceRequest::parse(&serde_json::json!({"question":"Quel aperçu préférez-vous ?","options":[
+        {"id":"lyra","label":"LYRA","image_path":format!("{}/assets/lyra-avatar.png", env!("CARGO_MANIFEST_DIR"))},
+        {"id":"diagram","label":"Disposition","svg":diagram(false)}
+    ]}).to_string())?;
+    messages.set_vec(vec![request.to_row()]);
+    snapshot(&app, &window, &out.join("choices-images.png"), 1080, 800)?;
+
+    // Les propositions sont aussi utilisables au clavier et sur petite fenêtre.
+    let request = choices::ChoiceRequest::parse(
+        r#"{"question":"Which style?","options":[{"id":"compact","label":"Compact"},{"id":"airy","label":"Airy"}]}"#,
+    )?;
+    messages.set_vec(vec![request.to_row()]);
+    app.set_tr(i18n::tr(i18n::Lang::En).to_slint());
+    app.set_follow_output(false);
+    snapshot(
+        &app,
+        &window,
+        &out.join("choices-english-compact.png"),
+        480,
+        720,
+    )?;
+    app.invoke_focus_composer();
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Shift.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Tab.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Tab.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Shift.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Return.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Return.into(),
+    });
+    assert_eq!(
+        selections.borrow().len(),
+        2,
+        "les options doivent être activables au clavier"
+    );
+
+    // Le sélecteur d'abonnement fonctionne aussi sans souris.
+    messages.set_vec(Vec::new());
+    app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+    app.set_draft("".into());
+    app.set_provider_index(0);
+    app.set_model_label("".into());
+    app.set_busy(false);
+    app.set_overlay("none".into());
+    app.invoke_scroll_bottom();
+    snapshot(&app, &window, &out.join("provider-zcode.png"), 1080, 800)?;
+    let providers = Rc::new(RefCell::new(Vec::new()));
+    let changed = providers.clone();
+    app.on_provider_selected(move |index| changed.borrow_mut().push(index));
+    app.invoke_focus_composer();
+    for key in [
+        slint::platform::Key::Tab,
+        slint::platform::Key::Tab,
+        slint::platform::Key::DownArrow,
+        slint::platform::Key::DownArrow,
+    ] {
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    }
+    assert_eq!(
+        &*providers.borrow(),
+        &[1, 2],
+        "sélection Claude Code puis Codex au clavier"
+    );
+    assert_eq!(app.get_provider_index(), 2);
+    snapshot(
+        &app,
+        &window,
+        &out.join("provider-codex-compact.png"),
+        480,
+        600,
+    )?;
+    app.set_busy(true);
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::UpArrow.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::UpArrow.into(),
+    });
+    assert_eq!(
+        app.get_provider_index(),
+        2,
+        "pas de changement de fournisseur pendant un tour"
+    );
+    app.set_busy(false);
+
     println!(
         "Captures écrites dans {} ; interactions vérifiées.",
         out.display()

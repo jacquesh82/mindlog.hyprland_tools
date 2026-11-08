@@ -1,5 +1,11 @@
-import { Button, LineEdit, ComboBox, TextEdit, Palette } from "std-widgets.slint";
-import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader } from "components.slint";
+import { SwatchRow, ChoiceOptionRow } from "choice-types.slint";
+import { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
+export { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
+import { RichContent } from "rich-content.slint";
+export { SwatchRow, ChoiceOptionRow } from "choice-types.slint";
+import { Button, LineEdit, ComboBox, TextEdit, Palette, Spinner, CheckBox } from "std-widgets.slint";
+import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader, ToolDetails, ChoiceCard } from "components.slint";
+export { AvatarFrames } from "components.slint";
 
 // ─── Structures de données ────────────────────────────────────────────────
 
@@ -7,7 +13,12 @@ import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader } from "compon
 export struct MessageRow {
     kind: string,
     text: string,
+    html: string,
+    rich-blocks: [RichBlockRow],
+    choices: [ChoiceOptionRow],
+    choice-state: string,
 }
+
 
 // Pièce jointe en attente d'envoi (chip au-dessus de la saisie).
 export struct AttachmentRow {
@@ -27,7 +38,7 @@ export struct HistoryRow {
 // Dictionnaire i18n complet (FR/EN) — rempli par src/i18n.rs.
 export struct TrTexts {
     send: string, cancel: string, save: string, close: string, new-chat: string,
-    status-starting: string, status-thinking: string, placeholder: string, attach: string,
+    status-starting: string, status-thinking: string, status-writing: string, placeholder: string, attach: string,
     tip-help: string, tip-settings: string, tip-history: string,
     welcome-title: string, welcome-l1: string, welcome-l2: string, welcome-l3: string,
     header-subtitle: string, composer-hint: string,
@@ -39,10 +50,14 @@ export struct TrTexts {
     settings-endpoint: string, settings-max-tokens: string, settings-api-key: string,
     settings-clients: string, settings-clients-ok: string, settings-clients-missing: string,
     settings-saved: string, settings-invalid: string,
+    settings-motion: string,
+    provider: string, subscription-hint: string,
     history-title: string, history-hint: string, history-empty: string,
     restore: string, restore-started: string, restore-done: string, restore-failed: string,
     no-backup: string, clients-notice: string,
     label-you: string, label-tool: string, label-error: string,
+    show-tool-details: string, hide-tool-details: string, status-tools: string,
+    choice-done: string, choice-skipped: string, choice-selected: string, preview-missing: string,
     new-conversation: string, mcp-unavailable: string, mcp-tools: string,
 }
 
@@ -62,7 +77,12 @@ export component ChatWindow inherits Window {
     in-out property <TrTexts> tr;
     in-out property <string> status: "…";
     in-out property <string> model-label: "";
+    in-out property <int> provider-index: 0;
     in-out property <bool> busy: false;
+    in-out property <string> activity: "thinking";
+    in-out property <bool> animations-enabled: true;
+    in-out property <float> avatar-time: -1;
+    in-out property <bool> follow-output: true;
     in-out property <string> draft;
     in-out property <[MessageRow]> messages;
     in-out property <[AttachmentRow]> attachments;
@@ -77,6 +97,7 @@ export component ChatWindow inherits Window {
     in-out property <string> cfg-max-tokens: "";
     in-out property <string> cfg-api-key: "";
     in-out property <string> settings-error;
+    in-out property <bool> cfg-animate-avatar: true;
     in-out property <bool> clients-claude-ok: false;
     in-out property <bool> clients-zcode-ok: false;
     in-out property <string> clients-claude-cmd: "";
@@ -86,6 +107,7 @@ export component ChatWindow inherits Window {
     in-out property <string> app-version: "";
 
     callback send(string);
+    callback provider-selected(int);
     callback new-conversation();
     callback attach-clicked();
     callback remove-attachment(int);
@@ -93,6 +115,8 @@ export component ChatWindow inherits Window {
     callback close-overlay();
     callback save-settings();
     callback restore-requested(string);
+    callback choice-selected(int, string);
+    callback open-source(string);
 
     // La mesure intrinsèque ne dépend pas des décisions responsives.
     private property <length> view-width: 1080px;
@@ -100,14 +124,81 @@ export component ChatWindow inherits Window {
 
     private property <length> column-width: min(root.view-width - 48px, 800px);
     private property <bool> interactive: !root.busy && root.overlay == "none";
+    private property <bool> motion-allowed: root.animations-enabled && !root.minimized && root.overlay == "none";
+    private property <float> motion-clock: 0;
+    private property <float> avatar-phase: root.avatar-time >= 0 ? root.avatar-time : root.motion-clock;
+    private property <bool> typing-active: false;
+    public pure function animation-time() -> float { return root.motion-clock; }
+    // Une seule horloge partagée, à 20 Hz, mise en pause pendant la saisie.
+    // Pas de animation-tick() qui impose le rendu à chaque rafraîchissement écran.
+    avatar-timer := Timer {
+        interval: 50ms;
+        running: root.motion-allowed && !root.typing-active && root.avatar-time < 0;
+        triggered => { root.motion-clock += 0.05; }
+    }
+    typing-timer := Timer {
+        interval: 250ms;
+        running: false;
+        triggered => { self.stop(); root.typing-active = false; }
+    }
 
     public function scroll-bottom() {
-        if root.messages.length > 0 {
-            flick.content-y = Math.max(0px, flick.content-height - flick.height);
+        if root.messages.length == 0 {
+            scroll-timer.stop();
+            choice-timer.stop();
+            flick.content-y = 0px;
+        } else if root.follow-output {
+            // Coalescer les fragments ; mesurer après la mise en page du texte.
+            scroll-timer.start();
+        }
+    }
+
+    public pure function is-at-bottom() -> bool {
+        return flick.content-height + flick.content-y - flick.height <= 4px;
+    }
+
+    public pure function scroll-overflow() -> length {
+        return max(0px, flick.content-height - flick.height);
+    }
+    public pure function scroll-position() -> length { return flick.content-y; }
+
+    scroll-timer := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            if root.follow-output {
+                flick.content-y = min(0px, flick.height - flick.content-height);
+            }
+        }
+    }
+
+    private property <length> choice-anchor;
+    private property <length> activity-row-height: 40px;
+    public function prepare-choice() {
+        root.follow-output = false;
+        // Le choix est inséré avant l'indicateur transitoire de fin du journal.
+        root.choice-anchor = root.messages.length == 0 ? 28px : log.preferred-height + 46px
+            - (root.busy ? root.activity-row-height + log.spacing : 0px);
+        choice-timer.start();
+    }
+    choice-timer := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.running = false;
+            flick.content-y = -min(root.choice-anchor, max(0px, flick.content-height - flick.height));
         }
     }
 
     public function focus-composer() { le.focus(); }
+
+    public pure function activity-label() -> string {
+        return root.activity == "writing" ? root.tr.status-writing
+            : root.activity == "tools" ? root.tr.status-tools
+            : root.activity == "restore" ? root.tr.restore-started
+            : root.tr.status-thinking;
+    }
 
     Rectangle {
         min-width: 0px;
@@ -129,7 +220,13 @@ export component ChatWindow inherits Window {
                     padding-top: 18px;
                     padding-bottom: 18px;
                     spacing: 12px;
-                    Avatar { width: 42px; height: 42px; }
+                    Avatar {
+                        width: 42px; height: 42px;
+                        animated: root.motion-allowed;
+                        engaged: root.busy;
+                        time-override: root.avatar-phase;
+                        blink-enabled: !root.typing-active;
+                    }
                     VerticalLayout {
                         spacing: 3px;
                         alignment: center;
@@ -176,6 +273,16 @@ export component ChatWindow inherits Window {
 
             // Une colonne de lecture stable, même lorsque la fenêtre est maximisée.
             flick := Flickable {
+                flicked => { root.follow-output = false; }
+                changed content-y => {
+                    // Seul un geste utilisateur suspend le suivi ; une re-mesure
+                    // pendant le streaming ne doit pas être prise pour ce geste.
+                    if !root.follow-output && root.is-at-bottom() {
+                        root.follow-output = true;
+                    }
+                }
+                changed content-height => { root.scroll-bottom(); }
+                changed height => { root.scroll-bottom(); }
                 vertical-stretch: 1;
                 horizontal-stretch: 1;
                 min-width: 0px;
@@ -195,7 +302,13 @@ export component ChatWindow inherits Window {
                         spacing: 0px;
                         HorizontalLayout {
                             alignment: center;
-                            Avatar { width: root.view-width < 650px ? 72px : 100px; height: self.width; }
+                            Avatar {
+                                width: root.view-width < 650px ? 72px : 100px;
+                                height: self.width;
+                                animated: root.motion-allowed && flick.content-y + log.y + 100px > 0px;
+                                time-override: root.avatar-phase;
+                                blink-enabled: !root.typing-active;
+                            }
                         }
                         Rectangle { height: root.view-width < 650px ? 16px : 20px; }
                         Text {
@@ -274,43 +387,111 @@ export component ChatWindow inherits Window {
                         }
                     }
 
-                    for row in root.messages: Rectangle {
+                    for row[i] in root.messages: Rectangle {
                         height: message.preferred-height;
-                        message := HorizontalLayout {
+                        message := VerticalLayout {
                             width: parent.width;
                             height: parent.height;
-                            spacing: 12px;
-                            if row.kind == "user": Rectangle { horizontal-stretch: 1; }
-                            if row.kind == "assistant": Avatar { width: 32px; height: 32px; }
-                            Rectangle {
-                                horizontal-stretch: row.kind == "user" ? 0 : 1;
-                                width: row.kind == "user" ? min(root.column-width * 0.85, body.preferred-width + 36px) : root.column-width - 44px;
-                                height: body.preferred-height + 28px;
-                                border-radius: 14px;
-                                background: row.kind == "user" ? #1C323B : row.kind == "error" ? #291C25 : row.kind == "status" ? transparent : Theme.panel;
-                                border-width: row.kind == "status" ? 0px : 1px;
-                                border-color: row.kind == "error" ? #67404E : row.kind == "user" ? #2B4C55 : Theme.border;
-                                body := VerticalLayout {
-                                    x: 18px; y: 14px;
-                                    width: parent.width - 36px;
-                                    height: self.preferred-height;
-                                    spacing: 7px;
-                                    if row.kind != "status": Text {
-                                        text: row.kind == "user" ? root.tr.label-you : row.kind == "assistant" ? "LYRA" : row.kind == "tool" ? root.tr.label-tool : root.tr.label-error;
-                                        color: row.kind == "error" ? #F3A9B7 : row.kind == "assistant" ? Theme.accent : Theme.secondary;
-                                        font-size: 12px;
-                                        font-weight: 600;
-                                    }
-                                    Text {
-                                        text: row.text;
-                                        color: row.kind == "error" ? #F3C6D0 : row.kind == "tool" || row.kind == "status" ? Theme.secondary : Theme.text;
-                                        font-size: row.kind == "tool" || row.kind == "status" ? 12px : 14px;
-                                        font-family: row.kind == "tool" ? "monospace" : root.default-font-family;
-                                        wrap: word-wrap;
+                            if row.kind == "tool": ToolDetails {
+                                details: row.text;
+                                show-label: root.tr.show-tool-details;
+                                hide-label: root.tr.hide-tool-details;
+                                toggled => { root.follow-output = false; }
+                            }
+                            if row.kind == "choice": VerticalLayout {
+                                spacing: 10px;
+                                Text {
+                                    text: row.text;
+                                    color: Theme.text;
+                                    font-size: 16px;
+                                    font-weight: 600;
+                                    wrap: word-wrap;
+                                }
+                                for option in row.choices: ChoiceCard {
+                                    label: option.label;
+                                    description: option.description;
+                                    swatches: option.swatches;
+                                    colors-text: option.colors-text;
+                                    preview: option.preview;
+                                    preview-missing: option.preview-missing;
+                                    missing-label: root.tr.preview-missing;
+                                    source: option.source;
+                                    source-label: option.source-label;
+                                    selected: option.selected;
+                                    enabled: root.interactive && row.choice-state == "pending";
+                                    invoked => { root.choice-selected(i, option.id); }
+                                    source-clicked => { root.open-source(option.source); }
+                                }
+                                if row.choice-state != "pending": Text {
+                                    text: row.choice-state == "selected" ? root.tr.choice-done : root.tr.choice-skipped;
+                                    color: Theme.muted;
+                                    font-size: 12px;
+                                }
+                            }
+                            if row.kind != "tool" && row.kind != "choice": HorizontalLayout {
+                                width: parent.width;
+                                spacing: 12px;
+                                if row.kind == "user": Rectangle { horizontal-stretch: 1; }
+                                if row.kind == "assistant": Avatar { width: 32px; height: 32px; }
+                                Rectangle {
+                                    horizontal-stretch: row.kind == "user" ? 0 : 1;
+                                    width: row.kind == "user" ? min(root.column-width * 0.85, body.preferred-width + 36px) : root.column-width - 44px;
+                                    height: body.preferred-height + 28px;
+                                    border-radius: 14px;
+                                    background: row.kind == "user" ? #1C323B : row.kind == "error" ? #291C25 : row.kind == "status" ? transparent : Theme.panel;
+                                    border-width: row.kind == "status" ? 0px : 1px;
+                                    border-color: row.kind == "error" ? #67404E : row.kind == "user" ? #2B4C55 : Theme.border;
+                                    body := VerticalLayout {
+                                        x: 18px; y: 14px;
+                                        width: parent.width - 36px;
+                                        height: self.preferred-height;
+                                        spacing: 7px;
+                                        if row.kind != "status": Text {
+                                            text: row.kind == "user" ? root.tr.label-you : row.kind == "assistant" ? "LYRA" : row.kind == "tool" ? root.tr.label-tool : root.tr.label-error;
+                                            color: row.kind == "error" ? #F3A9B7 : row.kind == "assistant" ? Theme.accent : Theme.secondary;
+                                            font-size: 12px;
+                                            font-weight: 600;
+                                        }
+                                        if row.kind == "assistant" && row.rich-blocks.length > 0: RichContent {
+                                            blocks: row.rich-blocks;
+                                            open-link(url) => { root.open-source(url); }
+                                        }
+                                        if row.kind != "assistant" || row.rich-blocks.length == 0: Text {
+                                            text: row.text;
+                                            color: row.kind == "error" ? #F3C6D0 : row.kind == "tool" || row.kind == "status" ? Theme.secondary : Theme.text;
+                                            font-size: row.kind == "tool" || row.kind == "status" ? 12px : 14px;
+                                            font-family: row.kind == "tool" ? "monospace" : root.default-font-family;
+                                            wrap: word-wrap;
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+
+                    // Indicateur transitoire : indépendant des messages et détails d'outils.
+                    if root.busy: HorizontalLayout {
+                        height: root.activity-row-height;
+                        spacing: 10px;
+                        Avatar {
+                            width: 32px; height: 32px;
+                            animated: root.motion-allowed && root.follow-output;
+                            engaged: true;
+                            time-override: root.avatar-phase;
+                            blink-enabled: !root.typing-active;
+                        }
+                        Spinner {
+                            width: 16px; height: 16px; y: 12px;
+                            indeterminate: true;
+                            accessible-label: root.activity-label();
+                        }
+                        Text {
+                            text: root.activity-label();
+                            color: Theme.secondary;
+                            font-size: 13px;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
                     }
                 }
             }
@@ -353,6 +534,11 @@ export component ChatWindow inherits Window {
                             placeholder-text: root.tr.placeholder;
                             accessible-label: root.tr.placeholder;
                             enabled: root.interactive;
+                            edited => {
+                                root.typing-active = true;
+                                typing-timer.start();
+                                typing-timer.restart();
+                            }
                             accepted(t) => {
                                 if t != "" || root.attachments.length > 0 {
                                     root.send(t);
@@ -368,6 +554,17 @@ export component ChatWindow inherits Window {
                                 height: 32px;
                                 enabled: root.interactive;
                                 clicked => { root.attach-clicked(); }
+                            }
+                            ComboBox {
+                                model: ["Zcode", "Claude Code", "Codex"];
+                                current-index <=> root.provider-index;
+                                accessible-label: root.tr.provider;
+                                enabled: root.interactive;
+                                height: 32px;
+                                min-width: 140px;
+                                preferred-width: 150px;
+                                max-width: 170px;
+                                selected => { root.provider-selected(self.current-index); }
                             }
                             Text {
                                 text: root.model-label;
@@ -403,7 +600,7 @@ export component ChatWindow inherits Window {
                         background: root.busy ? #DFB870 : Theme.muted;
                     }
                     Text {
-                        text: root.status;
+                        text: root.busy ? root.activity-label() : root.status;
                         color: Theme.secondary;
                         font-size: 11px;
                         overflow: elide;
@@ -525,34 +722,44 @@ export component ChatWindow inherits Window {
                                         model: ["Français", "English"];
                                         current-index <=> root.cfg-lang-index;
                                     }
+                                    CheckBox {
+                                        text: root.tr.settings-motion;
+                                        checked <=> root.cfg-animate-avatar;
+                                    }
+                                    if root.provider-index != 0: Text {
+                                        text: root.tr.subscription-hint;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
+                                    }
                                     Text {
                                         text: root.tr.settings-model;
                                         color: Theme.secondary;
                                         font-size: 13px;
                                     }
                                     LineEdit { text <=> root.cfg-model; accessible-label: root.tr.settings-model; }
-                                    Text {
+                                    if root.provider-index == 0: Text {
                                         text: root.tr.settings-endpoint;
                                         color: Theme.secondary;
                                         font-size: 13px;
                                     }
-                                    LineEdit { text <=> root.cfg-base-url; accessible-label: root.tr.settings-endpoint; }
-                                    Text {
+                                    if root.provider-index == 0: LineEdit { text <=> root.cfg-base-url; accessible-label: root.tr.settings-endpoint; }
+                                    if root.provider-index == 0: Text {
                                         text: root.tr.settings-max-tokens;
                                         color: Theme.secondary;
                                         font-size: 13px;
                                     }
-                                    LineEdit {
+                                    if root.provider-index == 0: LineEdit {
                                         text <=> root.cfg-max-tokens;
                                         accessible-label: root.tr.settings-max-tokens;
                                         input-type: InputType.number;
                                     }
-                                    Text {
+                                    if root.provider-index == 0: Text {
                                         text: root.tr.settings-api-key;
                                         color: Theme.secondary;
                                         font-size: 13px;
                                     }
-                                    LineEdit {
+                                    if root.provider-index == 0: LineEdit {
                                         text <=> root.cfg-api-key;
                                         accessible-label: root.tr.settings-api-key;
                                         input-type: InputType.password;

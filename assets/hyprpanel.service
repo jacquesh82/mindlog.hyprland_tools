@@ -1,5 +1,5 @@
 # Unit systemd user pour hyprpanel — déposée par scripts/install.sh
-# (qui précise WAYLAND_DISPLAY détecté). Modèle : hyprdmc.service.
+# (qui précise WAYLAND_DISPLAY détecté).
 [Unit]
 Description=hyprpanel - panneau de configuration Hyprland (serveur MCP)
 PartOf=graphical-session.target

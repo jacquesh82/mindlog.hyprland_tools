@@ -1,13 +1,13 @@
 //! Inventaire des fichiers de configuration Hyprland (~/.config/hypr).
 //!
 //! La configuration active est `hyprland.lua` (API `hl.*`). `monitors.lua` et
-//! `inputs.lua` sont **générés par hyprdmc** : lecture seule pour nous — les
+//! `inputs.lua` sont **générés par un outil externe** : lecture seule pour nous — les
 //! modifier à la main serait écrasé au prochain passage du démon.
 
 use std::path::Path;
 
-/// Fichiers appartenant à un outil externe (hyprdmc) : ne jamais éditer.
-pub const MANAGED_EXTERNALLY: &[(&str, &str)] = &[("monitors.lua", "hyprdmc"), ("inputs.lua", "hyprdmc")];
+/// Fichiers appartenant à un outil externe : ne jamais éditer.
+pub const MANAGED_EXTERNALLY: &[(&str, &str)] = &[("monitors.lua", "external"), ("inputs.lua", "external")];
 
 #[derive(Debug, serde::Serialize)]
 pub struct ConfigFileInfo {
@@ -15,7 +15,7 @@ pub struct ConfigFileInfo {
     pub path: String,
     /// `main-lua` | `generated-lua` | `lua` | `conf` | `theme`
     pub kind: &'static str,
-    /// Nom de l'outil qui régénère ce fichier, s'il y en a un.
+    /// Gestionnaire du fichier, ou `external` pour un générateur externe.
     pub managed_by: Option<&'static str>,
     pub size_bytes: u64,
     pub modified: String,
@@ -135,7 +135,7 @@ mod tests {
                 ("dracula.conf", "theme", None),
                 ("hyprland.lua", "main-lua", None),
                 ("hyprpaper.conf", "conf", None),
-                ("monitors.lua", "generated-lua", Some("hyprdmc")),
+                ("monitors.lua", "generated-lua", Some("external")),
             ]
         );
         fs::remove_dir_all(&d).unwrap();
