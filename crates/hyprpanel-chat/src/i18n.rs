@@ -89,6 +89,21 @@ pub struct Tr {
     pub settings_saved: String,
     pub settings_invalid: String,
     pub settings_motion: String,
+    pub tab_general: String,
+    pub tab_access: String,
+    pub tab_assistant: String,
+    pub tab_memory: String,
+    pub operation_title: String,
+    pub operation_confirm: String,
+    pub operation_full: String,
+    pub operation_sudo: String,
+    pub operation_copy: String,
+    pub operation_confirm_hint: String,
+    pub operation_full_hint: String,
+    pub operation_sudo_hint: String,
+    pub operation_copy_hint: String,
+    pub manual_command_notice: String,
+
     pub settings_scope: String,
     pub settings_scope_hint: String,
     pub memory_title: String,
@@ -167,12 +182,14 @@ pub fn tr(lang: Lang) -> Tr {
 const HELP_FR: &str = "\
 LYRA configure votre interface Hyprland en discutant.
 
-WORKFLOW — elle procède toujours ainsi :
+WORKFLOW HYPRLAND — lorsque les opérations sont autorisées :
 1. Test à chaud (hypr_set_option_live) : le réglage s'applique immédiatement, sans toucher aux fichiers — parfait pour essayer.
 2. Si vous validez : elle édite ~/.config/hypr/hyprland.lua et recharge (hypr_reload), puis vérifie les erreurs (hypr_config_errors).
-3. Après autorisation d’accès aux fichiers, une sauvegarde de la config est demandée avant chaque message : le panneau ⟲ permet de restaurer les sauvegardes disponibles.
+3. Après autorisation d’accès aux fichiers, hors mode copie, une sauvegarde de la config est demandée avant chaque message : le panneau ⟲ permet de restaurer les sauvegardes disponibles.
 
 ACCÈS AUX FICHIERS — LYRA demande votre accord pour consulter et modifier ~/.config. Refuser ou fermer la demande laisse l’accès désactivé. L’accord vaut pour la session et peut être retiré dans les réglages.
+
+MODES D’EXÉCUTION — Réglages → Accès : Tout confirmer (défaut), FULL access (aucune confirmation), Confirmer sudo (élévations et commandes indirectes détectées), ou Commandes à copier uniquement (aucune exécution ni modification). L’autorisation FS et les droits Linux restent applicables.
 
 CE QU'ELLE SAIT FAIRE
 • Lire l'état : écrans, espaces de travail, fenêtres, périphériques, raccourcis, options.
@@ -182,8 +199,8 @@ CE QU'ELLE SAIT FAIRE
 
 GARDE-FOUS
 • En cas d’incertitude, elle vérifie les sources officielles sur Internet et cite les pages consultées. Un échec de vérification est signalé.
-• Chaque commande, même de lecture, demande votre confirmation dans une boîte affichant son contenu exact. Refuser, fermer ou Échap n’exécute rien.
-• Après votre accord d’accès, un profil local de l’environnement est mémorisé sans lancer de commande ; il est consultable et actualisable dans les réglages.
+• Quand le mode choisi impose une confirmation, une boîte affiche la commande exacte. Refuser, fermer ou Échap n’exécute rien.
+• Après votre accord d’accès, un profil local de l’environnement est mémorisé ; les requêtes de métadonnées suivent le mode choisi. Consultez-le dans Réglages → Mémoire.
 • monitors.lua et inputs.lua sont générés par un outil externe : elle ne les édite jamais.
 • Un réglage à chaud répond « ok » même si l'option n'existe pas : elle vérifie l'effet réel.
 • Demandez-lui d'annoncer les changements visibles importants (hypr_notify).
@@ -193,12 +210,14 @@ LIMITES — pas de drag & drop, pas de PDF ; la conversation vit le temps de la 
 const HELP_EN: &str = "\
 LYRA configures your Hyprland desktop through conversation.
 
-WORKFLOW — she always proceeds like this:
+HYPRLAND WORKFLOW — when operations are allowed:
 1. Hot test (hypr_set_option_live): the setting applies immediately, no files touched — perfect for trying things out.
 2. Once you approve: she edits ~/.config/hypr/hyprland.lua and reloads (hypr_reload), then checks for errors (hypr_config_errors).
-3. After filesystem approval, a config snapshot is requested before each message: the ⟲ panel restores available snapshots.
+3. After filesystem approval, outside copy-only mode, a config snapshot is requested before each message: the ⟲ panel restores available snapshots.
 
 FILESYSTEM ACCESS — LYRA asks permission to read and edit ~/.config. Declining or closing the request leaves access disabled. Approval lasts for the session and can be revoked in Settings.
+
+EXECUTION MODES — Settings → Access: Confirm everything (default), FULL access (no confirmation), Confirm sudo (elevation and detected indirect commands), or Copy commands only (no execution or edits). Filesystem consent and Linux permissions still apply.
 
 WHAT SHE CAN DO
 • Read state: monitors, workspaces, windows, devices, keybindings, options.
@@ -208,8 +227,8 @@ WHAT SHE CAN DO
 
 SAFETY
 • When uncertain, she checks official online sources and cites the pages read. Failed verification is reported.
-• Every command, including read-only commands, requires confirmation in a dialog showing its exact content. Declining, closing or Escape runs nothing.
-• After filesystem approval, a local environment profile is remembered without running commands; view and refresh it in Settings.
+• When the selected mode requires confirmation, a dialog shows the exact command. Declining, closing or Escape runs nothing.
+• After filesystem approval, a local environment profile is remembered; metadata queries follow the selected mode. View and refresh it in Settings → Memory.
 • monitors.lua and inputs.lua are generated by an external tool: she never edits them.
 • A hot setting answers “ok” even for unknown options: she verifies the actual effect.
 • Ask her to announce important visible changes (hypr_notify).
@@ -287,8 +306,23 @@ fn french() -> Tr {
         settings_saved: "réglages enregistrés".into(),
         settings_invalid: "Vérifiez le modèle et la limite de tokens (256 à 200 000).".into(),
         settings_motion: "Animer l’avatar de LYRA".into(),
+        tab_general: "Général".into(),
+        tab_access: "Accès".into(),
+        tab_assistant: "Assistant".into(),
+        tab_memory: "Mémoire".into(),
+        operation_title: "Mode d’exécution".into(),
+        operation_confirm: "Tout confirmer (par défaut)".into(),
+        operation_full: "FULL access".into(),
+        operation_sudo: "Confirmer sudo".into(),
+        operation_copy: "Commandes à copier uniquement".into(),
+        manual_command_notice: "Commande à copier — non exécutée".into(),
+        operation_confirm_hint: "Chaque commande et action Hyprland demande une confirmation. Les modifications de fichiers suivent votre autorisation FS.".into(),
+        operation_full_hint: "Exécute les commandes, sudo compris, et les actions demandées sans confirmation. Les droits Linux et l’autorisation FS restent applicables.".into(),
+        operation_sudo_hint: "Les commandes ordinaires sont libres. Sudo, les autres élévations et les commandes indirectes détectées restent à confirmer.".into(),
+        operation_copy_hint: "Analyse les configurations autorisées et propose des commandes à copier. Aucune commande, modification de fichier ou action Hyprland n’est exécutée. Les données internes de LYRA restent enregistrées.".into(),
+
         settings_scope: "Limiter les actions au périmètre Wayland".into(),
-        settings_scope_hint: "Activé : bureau, applications, navigateurs et thèmes compris. Désactivé : demandes générales autorisées. Les permissions des fichiers et confirmations de commandes restent obligatoires.".into(),
+        settings_scope_hint: "Activé : bureau, applications, navigateurs et thèmes compris. Désactivé : demandes générales autorisées. Les permissions des fichiers et le mode d’exécution restent applicables.".into(),
         memory_title: "Utiliser la mémoire locale de conversation".into(),
         memory_hint: "Après autorisation FS, conserve jusqu’à 192 extraits de vos demandes et choix. Recherche locale à chaque envoi, sans service d’embeddings. Désactiver arrête la lecture et l’enregistrement ; effacer supprime ces extraits. Les rappels pertinents sont envoyés au fournisseur choisi avec votre message.".into(),
         memory_clear: "Effacer la mémoire de conversation".into(),
@@ -299,7 +333,7 @@ fn french() -> Tr {
         settings_context_invalid: "Le contexte SYSTEM doit contenir au maximum 16 000 caractères.".into(),
         fs_title: "Autoriser l’accès aux fichiers ?".into(),
         fs_body: "Autorisez-vous LYRA à accéder à vos configurations et à mémoriser l’environnement (OS, version, utilisateur, outils) ? Si la mémoire de conversation est activée, elle conserve aussi des extraits de vos demandes et choix. Les informations pertinentes sont transmises au fournisseur sélectionné.".into(),
-        fs_note: "Profil local : OS, paquets installés, lanceurs et configurations autorisées. Chaque commande de métadonnées demande votre confirmation. Fichiers privés et générés protégés. Accord valable pour la session, révocable dans les réglages (contexte réinitialisé). Les pièces jointes restent utilisables en cas de refus.".into(),
+        fs_note: "Profil local : OS, paquets installés, lanceurs et configurations autorisées. Les commandes suivent le mode d’exécution choisi. Fichiers privés et générés protégés. Accord valable pour la session, révocable dans les réglages (contexte réinitialisé). Les pièces jointes restent utilisables en cas de refus.".into(),
         fs_allow: "Autoriser l’accès".into(),
         fs_refuse: "Refuser".into(),
         fs_granted: "FS : accès autorisé".into(),
@@ -315,7 +349,7 @@ fn french() -> Tr {
         command_restore: "Restaurer la sauvegarde sélectionnée, puis recharger Hyprland.".into(),
         command_desktop: "Interroger ou agir sur Hyprland avec l’outil et les paramètres affichés.".into(),
         environment_title: "Environnement mémorisé localement".into(),
-        environment_note: "Inventaire des paquets installés, lanceurs et configurations autorisées. Versions issues des paquets ; références sans paquet et configurations actives non confirmées restent signalées. Chaque commande de métadonnées demande votre accord. Profil local partagé avec le fournisseur pour contextualiser vos demandes.".into(),
+        environment_note: "Inventaire des paquets installés, lanceurs et configurations autorisées. Versions issues des paquets ; références sans paquet et configurations actives non confirmées restent signalées. Les commandes suivent le mode d’exécution choisi. Profil local partagé avec le fournisseur pour contextualiser vos demandes.".into(),
         environment_refresh: "Actualiser l’environnement".into(),
         environment_scanning: "Inventaire des paquets et configurations…".into(),
         environment_query: "Lire l’inventaire installé de {} : noms, versions et chemins déclarés. Aucune installation, mise à jour ni exécution des commandes trouvées dans vos configurations.".into(),
@@ -406,8 +440,23 @@ fn english() -> Tr {
         settings_saved: "settings saved".into(),
         settings_invalid: "Check the model and token limit (256 to 200,000).".into(),
         settings_motion: "Animate LYRA’s avatar".into(),
+        tab_general: "General".into(),
+        tab_access: "Access".into(),
+        tab_assistant: "Assistant".into(),
+        tab_memory: "Memory".into(),
+        operation_title: "Execution mode".into(),
+        operation_confirm: "Confirm everything (default)".into(),
+        operation_full: "FULL access".into(),
+        operation_sudo: "Confirm sudo".into(),
+        operation_copy: "Copy commands only".into(),
+        manual_command_notice: "Command to copy — not executed".into(),
+        operation_confirm_hint: "Every command and Hyprland action requires confirmation. File edits follow your filesystem consent.".into(),
+        operation_full_hint: "Runs requested commands, including sudo, and actions without confirmation. Linux permissions and filesystem consent still apply.".into(),
+        operation_sudo_hint: "Ordinary commands run freely. Sudo, other privilege elevation and detected indirect commands still require confirmation.".into(),
+        operation_copy_hint: "Analyzes approved configurations and proposes commands to copy. No command, file edit or Hyprland action is executed. LYRA’s internal data is still saved.".into(),
+
         settings_scope: "Limit actions to the Wayland desktop".into(),
-        settings_scope_hint: "On: desktop, applications, browsers and themes are included. Off: general requests are allowed. Filesystem permissions and command confirmations still apply.".into(),
+        settings_scope_hint: "On: desktop, applications, browsers and themes are included. Off: general requests are allowed. Filesystem permissions and the selected execution mode still apply.".into(),
         memory_title: "Use local conversation memory".into(),
         memory_hint: "After filesystem consent, keeps up to 192 excerpts from your requests and choices. Searches locally on send, with no embedding service. Disabling stops reading and recording; clearing deletes the excerpts. Relevant recalls are sent to your selected provider with your message.".into(),
         memory_clear: "Clear conversation memory".into(),
@@ -418,7 +467,7 @@ fn english() -> Tr {
         settings_context_invalid: "The SYSTEM context must not exceed 16,000 characters.".into(),
         fs_title: "Allow filesystem access?".into(),
         fs_body: "Allow LYRA to access your configuration files and remember the environment (OS, version, username, tools)? If conversation memory is enabled, it also keeps excerpts from your requests and choices. Relevant information is sent to the selected provider.".into(),
-        fs_note: "Local profile: OS, installed packages, launchers and approved configs. Every metadata command requires confirmation. Private and generated files stay protected. Session access can be revoked in Settings (model context resets). Attachments remain available if you decline.".into(),
+        fs_note: "Local profile: OS, installed packages, launchers and approved configs. Commands follow the selected execution mode. Private and generated files stay protected. Session access can be revoked in Settings (model context resets). Attachments remain available if you decline.".into(),
         fs_allow: "Allow access".into(),
         fs_refuse: "Decline".into(),
         fs_granted: "FS: access allowed".into(),
@@ -434,7 +483,7 @@ fn english() -> Tr {
         command_restore: "Restore the selected backup, then reload Hyprland.".into(),
         command_desktop: "Query or act on Hyprland using the displayed tool and parameters.".into(),
         environment_title: "Locally remembered environment".into(),
-        environment_note: "Installed packages, launchers and approved configurations. Versions come from packages; unpackaged references and unconfirmed active configs remain identified. Every metadata command needs confirmation. The local profile is shared with the provider to contextualize requests.".into(),
+        environment_note: "Installed packages, launchers and approved configurations. Versions come from packages; unpackaged references and unconfirmed active configs remain identified. Commands follow the selected execution mode. The local profile is shared with the provider to contextualize requests.".into(),
         environment_refresh: "Refresh environment".into(),
         environment_scanning: "Discovering packages and configurations…".into(),
         environment_query: "Read the installed {} inventory: names, versions and declared paths. No installation, upgrade or execution of commands found in your configurations.".into(),
@@ -526,6 +575,20 @@ impl Tr {
             settings_saved: self.settings_saved.clone().into(),
             settings_invalid: self.settings_invalid.clone().into(),
             settings_motion: self.settings_motion.clone().into(),
+            tab_general: self.tab_general.clone().into(),
+            tab_access: self.tab_access.clone().into(),
+            tab_assistant: self.tab_assistant.clone().into(),
+            tab_memory: self.tab_memory.clone().into(),
+            operation_title: self.operation_title.clone().into(),
+            operation_confirm: self.operation_confirm.clone().into(),
+            operation_full: self.operation_full.clone().into(),
+            operation_sudo: self.operation_sudo.clone().into(),
+            operation_copy: self.operation_copy.clone().into(),
+            operation_confirm_hint: self.operation_confirm_hint.clone().into(),
+            operation_full_hint: self.operation_full_hint.clone().into(),
+            operation_sudo_hint: self.operation_sudo_hint.clone().into(),
+            operation_copy_hint: self.operation_copy_hint.clone().into(),
+
             settings_scope: self.settings_scope.clone().into(),
             settings_scope_hint: self.settings_scope_hint.clone().into(),
             memory_title: self.memory_title.clone().into(),

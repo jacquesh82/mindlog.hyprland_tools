@@ -3,8 +3,8 @@ import { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
 export { RichBlockRow, RichCellRow, RichTableRow } from "richtext-types.slint";
 import { RichContent } from "rich-content.slint";
 export { SwatchRow, ChoiceOptionRow } from "choice-types.slint";
-import { Button, LineEdit, ComboBox, TextEdit, Palette, Spinner, CheckBox, ScrollView } from "std-widgets.slint";
-import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader, ToolDetails, ChoiceCard, WorkProgress } from "components.slint";
+import { Button, LineEdit, ComboBox, TextEdit, Palette, Spinner, CheckBox, ScrollView, TabWidget } from "std-widgets.slint";
+import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader, ToolDetails, ChoiceCard, WorkProgress, SettingsPage } from "components.slint";
 export { AvatarFrames } from "components.slint";
 
 // ─── Structures de données ────────────────────────────────────────────────
@@ -51,6 +51,9 @@ export struct TrTexts {
     settings-clients: string, settings-clients-ok: string, settings-clients-missing: string,
     settings-saved: string, settings-invalid: string,
     settings-motion: string,
+    tab-general: string, tab-access: string, tab-assistant: string, tab-memory: string,
+    operation-title: string, operation-confirm: string, operation-full: string, operation-sudo: string, operation-copy: string,
+    operation-confirm-hint: string, operation-full-hint: string, operation-sudo-hint: string, operation-copy-hint: string,
     settings-scope: string, settings-scope-hint: string,
     memory-title: string, memory-hint: string, memory-clear: string, memory-confirm: string, memory-cleared: string,
     settings-context: string, settings-context-hint: string, settings-context-invalid: string,
@@ -112,6 +115,9 @@ export component ChatWindow inherits Window {
     in-out property <bool> cfg-animate-avatar: true;
     in-out property <bool> cfg-limit-wayland-scope: true;
     in-out property <bool> cfg-memory-enabled: true;
+    in-out property <int> cfg-operation-mode: 0;
+    in-out property <int> settings-tab: 0;
+    in-out property <bool> operations-allowed: true;
     callback clear-memory();
     in-out property <string> cfg-system-context;
     in-out property <bool> fs-approved: false;
@@ -874,22 +880,14 @@ export component ChatWindow inherits Window {
                             font-size: 13px;
                             wrap: word-wrap;
                         }
-                        settings-scroll := ScrollView {
+                        TabWidget {
+                            current-index <=> root.settings-tab;
                             vertical-stretch: 1;
-                            horizontal-stretch: 1;
                             min-width: 0px;
-                            max-width: 16384px;
-                            horizontal-scrollbar-policy: always-off;
-                            content-width: self.visible-width;
-                            content-height: settings-content.preferred-height;
-                            settings-content := VerticalLayout {
-                                width: settings-scroll.visible-width;
-                                height: self.preferred-height;
-                                padding: 2px;
-                                padding-right: 16px;
-                                spacing: 8px;
-                                setform := VerticalLayout {
-                                    spacing: 8px;
+                            min-height: 0px;
+                            Tab {
+                                title: root.tr.tab-general;
+                                SettingsPage {
                                     Text {
                                         text: root.tr.settings-language;
                                         color: Theme.secondary;
@@ -903,23 +901,11 @@ export component ChatWindow inherits Window {
                                         text: root.tr.settings-motion;
                                         checked <=> root.cfg-animate-avatar;
                                     }
-                                    CheckBox {
-                                        text: root.tr.settings-scope;
-                                        checked <=> root.cfg-limit-wayland-scope;
-                                    }
-                                    Text {
-                                        text: root.tr.settings-scope-hint;
-                                        color: Theme.secondary;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
-                                    CheckBox { text: root.tr.memory-title; checked <=> root.cfg-memory-enabled; }
-                                    Text { text: root.tr.memory-hint; color: Theme.secondary; font-size: 12px; wrap: word-wrap; }
-                                    ActionButton {
-                                        text: root.tr.memory-clear;
-                                        enabled: !root.busy;
-                                        clicked => { root.overlay = "memory"; }
-                                    }
+                                }
+                            }
+                            Tab {
+                                title: root.tr.tab-access;
+                                SettingsPage {
                                     HorizontalLayout {
                                         min-height: 38px;
                                         spacing: 12px;
@@ -939,6 +925,34 @@ export component ChatWindow inherits Window {
                                                 else { root.request-filesystem(); }
                                             }
                                         }
+                                    }
+                                    Text { text: root.tr.operation-title; color: Theme.text; font-size: 14px; font-weight: 600; }
+                                    ComboBox {
+                                        model: [root.tr.operation-confirm, root.tr.operation-full, root.tr.operation-sudo, root.tr.operation-copy];
+                                        current-index <=> root.cfg-operation-mode;
+                                        enabled: !root.busy;
+                                        accessible-label: root.tr.operation-title;
+                                    }
+                                    Text {
+                                        text: root.cfg-operation-mode == 1 ? root.tr.operation-full-hint : root.cfg-operation-mode == 2 ? root.tr.operation-sudo-hint : root.cfg-operation-mode == 3 ? root.tr.operation-copy-hint : root.tr.operation-confirm-hint;
+                                        color: Theme.secondary;
+                                        wrap: word-wrap;
+                                        font-size: 13px;
+                                    }
+                                }
+                            }
+                            Tab {
+                                title: root.tr.tab-assistant;
+                                SettingsPage {
+                                    CheckBox {
+                                        text: root.tr.settings-scope;
+                                        checked <=> root.cfg-limit-wayland-scope;
+                                    }
+                                    Text {
+                                        text: root.tr.settings-scope-hint;
+                                        color: Theme.secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
                                     }
                                     if root.provider-index != 0: Text {
                                         text: root.tr.subscription-hint;
@@ -997,21 +1011,6 @@ export component ChatWindow inherits Window {
                                         wrap: word-wrap;
                                         font-size: 13px;
                                     }
-                                    Text { text: root.tr.environment-title; color: Theme.text; font-size: 14px; font-weight: 600; }
-                                    Text { text: root.tr.environment-note; color: Theme.secondary; wrap: word-wrap; font-size: 12px; }
-                                    TextEdit {
-                                        text: root.environment-text;
-                                        accessible-label: root.tr.environment-title;
-                                        read-only: true;
-                                        height: 180px;
-                                        wrap: word-wrap;
-                                        font-size: 12px;
-                                    }
-                                    ActionButton {
-                                        text: root.tr.environment-refresh;
-                                        enabled: root.fs-approved && !root.busy;
-                                        clicked => { root.refresh-environment(); }
-                                    }
                                     Text {
                                         text: root.tr.settings-clients;
                                         color: Theme.secondary;
@@ -1045,6 +1044,33 @@ export component ChatWindow inherits Window {
                                     }
                                 }
                             }
+                            Tab {
+                                title: root.tr.tab-memory;
+                                SettingsPage {
+                                    CheckBox { text: root.tr.memory-title; checked <=> root.cfg-memory-enabled; }
+                                    Text { text: root.tr.memory-hint; color: Theme.secondary; font-size: 12px; wrap: word-wrap; }
+                                    ActionButton {
+                                        text: root.tr.memory-clear;
+                                        enabled: !root.busy;
+                                        clicked => { root.overlay = "memory"; }
+                                    }
+                                    Text { text: root.tr.environment-title; color: Theme.text; font-size: 14px; font-weight: 600; }
+                                    Text { text: root.tr.environment-note; color: Theme.secondary; wrap: word-wrap; font-size: 12px; }
+                                    TextEdit {
+                                        text: root.environment-text;
+                                        accessible-label: root.tr.environment-title;
+                                        read-only: true;
+                                        height: 180px;
+                                        wrap: word-wrap;
+                                        font-size: 12px;
+                                    }
+                                    ActionButton {
+                                        text: root.tr.environment-refresh;
+                                        enabled: root.fs-approved && !root.busy;
+                                        clicked => { root.refresh-environment(); }
+                                    }
+                                }
+                            }
                         }
                         HorizontalLayout {
                             alignment: end;
@@ -1055,6 +1081,7 @@ export component ChatWindow inherits Window {
                             }
                             ActionButton {
                                 text: root.tr.save;
+                                enabled: !root.busy;
                                 primary: true;
                                 clicked => { root.save-settings(); }
                             }
@@ -1119,7 +1146,7 @@ export component ChatWindow inherits Window {
                                             }
                                             if rec.has-backup: ActionButton {
                                                 text: root.tr.restore;
-                                                enabled: root.fs-approved;
+                                                enabled: root.operations-allowed && root.fs-approved;
                                                 clicked => {
                                                     root.close-overlay();
                                                     root.restore-requested(rec.backup);

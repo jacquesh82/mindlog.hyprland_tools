@@ -68,10 +68,9 @@ directory is excluded, including aliases. Generated `monitors.lua` and
 save the previous content under `file-backups` before an atomic write.
 
 The generic `hypr_eval` and `hypr_dispatch` tools are not exposed or accepted by
-LYRA. Shell commands use a separate, explicit per-command confirmation;
-approving filesystem access alone never permits them. Specialized Hyprland tools
-require filesystem approval, and IPC queries/actions require confirmation of the
-displayed tool and arguments. The independent MCP service still
+LYRA. Commands and actions follow the saved execution mode; filesystem approval
+alone does not replace that policy. Specialized Hyprland tools require filesystem
+approval and are unavailable in copy-only mode. The independent MCP service still
 exposes its original tools to clients registered separately.
 
 This is an assistant tool permission, not an OS sandbox. The application still
@@ -107,8 +106,9 @@ names/launch references in the approved configuration directory.
 | XBPS / pipx / Cargo | Confirmed installed-package JSON/text listing |
 | Manual installs / AppImage | Existing executable references from configs or desktop launchers; version remains unknown |
 
-Every command uses the same native, single-use approval dialog as chat commands,
-with a 60-second timeout and a 32 MiB inventory output cap. Declining stops the
+Inventory commands use the same execution policy as chat commands, with a
+60-second timeout and a 32 MiB output cap. Copy-only mode displays commands
+without running them. When confirmation is required, declining stops the
 remaining queries for that refresh; there is no silent shell fallback. Query
 output is parsed into selected metadata, never copied raw into model context.
 
@@ -201,10 +201,47 @@ not invent results or say that a failed request verified anything. Source links
 are included in the chat response. These are model instructions; the native tool
 gateway enforces network limits and command approval independently of the model.
 
+### Settings tabs and execution policy
+
+Settings uses native Slint tabs with independently scrollable pages: General
+(language, avatar), Access (filesystem consent, execution policy), Assistant
+(scope, subscription/model, SYSTEM context, client status), and Memory (conversation
+recall, clearing, environment profile). The footer stays visible. Unsaved values
+remain available when switching tabs; Save applies all pages together. The
+execution selector and Save are disabled while an operation is running.
+
+`chat.toml` stores `operation_mode`, with `confirm_all` as the backward-compatible
+default. Accepted values are `confirm_all`, `full_access`, `sudo_only`, `copy_only`.
+The selected policy is appended to the shared SYSTEM instructions after custom
+context, replaces older blanket confirmation text, and is enforced by local
+gateways for all three providers.
+
+| Mode | Shell | Hyprland / restore | Managed file writes |
+| --- | --- | --- | --- |
+| `confirm_all` | Per-command confirmation | Confirm IPC/action or restore/reload pair | User-requested writes after filesystem consent |
+| `full_access` | No confirmation, including sudo | No confirmation | Same filesystem consent |
+| `sudo_only` | Confirm detected elevation/indirect execution | No confirmation | Same filesystem consent |
+| `copy_only` | Return `manual_only`, never spawn | Blocked, including automatic backups | Blocked at the gateway |
+
+Copy-only still allows approved file reads, native metadata inventory, web research,
+and LYRA's own preference/profile/memory storage. The command tool remains available
+even without filesystem consent because it only returns a copyable code block.
+The host renders that block directly; no model response is needed to make it visible.
+File/MCP tools are filtered and independently checked, so stale calls cannot bypass
+the mode. Execution rechecks filesystem consent and mode after a pending approval.
+
+`sudo_only` recognizes sudo/sudoedit, doas, pkexec, su/runuser, including quoted or
+escaped names and compound shell commands. Expansion, eval/source, recognized
+shells/interpreters and `.sh` scripts also require confirmation because they can
+delegate privilege escalation. Detection examines proposed shell text, not the
+implementation of every executable; this is not an OS sandbox. All execution
+retains the account's normal Linux permissions. No sudo password prompt is provided.
+
 ### Command confirmation
 
 After filesystem approval, `lyra_run_command` accepts an exact shell script and
-a reason. A native modal displays both and waits for **Run** or **Decline**.
+a reason. When required by policy, a native modal displays both and waits for
+**Run** or **Decline**.
 Escape, closing, losing the target window, or an invalid/stale response denies
 execution. Confirmation IDs are single-use. A refusal stops the current tool
 round, defers remaining tool calls, and waits for another user message.
@@ -215,18 +252,19 @@ this boundary. There is no interactive stdin or terminal. Common credential
 environment variables and shell startup hooks are removed. Output is drained
 without blocking but retained only up to 32 KiB per stream; commands time out
 after 60 seconds, and their process group is stopped. A timeout may leave partial
-changes and never counts as success. Every later command needs a fresh approval.
+changes and never counts as success. Every later command that requires confirmation
+needs a fresh approval.
 
-Hyprland IPC queries/actions and screenshots use the same modal with their exact
+In the default mode, Hyprland IPC queries/actions and screenshots use the same modal with their exact
 tool name and JSON arguments. Managed file operations (configuration scans,
 backups, local text tools) and the static event buffer do not execute external
-commands. Restore confirms the restore/reload pair before running it.
+commands. Restore follows the selected policy for the restore/reload pair.
 Provider client startup, authentication checks, and user-invoked UI helpers are
 application plumbing; provider-native shell tools remain disabled.
 
 ### SYSTEM context
 
-Open **Settings → SYSTEM context** to define the assistant’s role and instructions.
+Open **Settings → Assistant → SYSTEM context** to define the assistant’s role and instructions.
 The text is shared by all three providers and saved as `system_context` in
 `chat.toml`. Saving applies it to subsequent messages in the current conversation.
 
@@ -253,13 +291,13 @@ relevant part. The prompt distinguishes a chocolate desktop palette from a
 cake recipe and asks LYRA to stop an off-topic thread even if an earlier answer
 had drifted. Custom roles remain subject to the selected scope.
 
-**Settings → Limit actions to the Wayland desktop** is enabled by default,
+**Settings → Assistant → Limit actions to the Wayland desktop** is enabled by default,
 including for older configurations without the new `limit_wayland_scope` key.
 Disable it to answer general requests. The setting is saved in `chat.toml` and
 updates SYSTEM for all providers immediately on save; no new conversation is
 needed. General mode overrides earlier scope-only refusals and a custom role's
 Wayland specialization. It keeps verification, color accessibility rules,
-filesystem permissions, and per-command confirmation.
+filesystem permissions, and the selected execution policy.
 
 ### Subscriptions and models
 

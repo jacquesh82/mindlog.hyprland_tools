@@ -12,9 +12,9 @@ through conversation, with local context and explicit approval before commands.
 The built-in compositor integration currently targets **Hyprland on Wayland**.
 
 The default scope covers Wayland and its desktop applications, browsers, and
-themes. Turn off **Settings → Limit actions to the Wayland desktop** to allow
+themes. Turn off **Settings → Assistant → Limit actions to the Wayland desktop** to allow
 broader Linux tasks and general requests. Command confirmations and filesystem
-permissions still apply.
+permissions and the selected execution mode still apply.
 
 ![LYRA interface with desktop suggestions, chat, and subscription selector](docs/images/lyra.png)
 
@@ -79,8 +79,26 @@ At launch, LYRA asks before giving the assistant read/write access to
 session and can be revoked in Settings. File contents may be shared with the
 selected provider when needed for your requests.
 
-Without approval, assistant file/desktop tools and automatic configuration
-backups stay disabled. Explicitly attached files remain available.
+Without approval, assistant file/desktop tools, command execution and automatic
+configuration backups stay disabled. Explicitly attached files and commands to
+copy remain available.
+
+## Execution modes
+
+Choose **Settings → Access → Execution mode**, then save:
+
+| Mode | Behavior |
+| --- | --- |
+| **Confirm everything** (default) | Confirm each shell command and Hyprland action. Managed file edits follow filesystem consent. |
+| **FULL access** | Execute requested commands, including sudo, and desktop actions without confirmation. |
+| **Confirm sudo** | Run ordinary commands and desktop actions freely; confirm sudo, other privilege elevation and detected indirect commands. |
+| **Copy commands only** | Analyze approved files and show copyable commands. Execute no commands, file edits, desktop actions, backups or restores. |
+
+All modes share the same behavior across Zcode, Claude Code and Codex. Filesystem
+consent and Linux account permissions still apply. Shells, interpreters, variable
+expansion and recognized scripts count as indirect execution in **Confirm sudo**.
+These checks operate on the proposed command text; they are not an OS sandbox.
+Commands remain noninteractive; LYRA does not collect your sudo password.
 
 ## Verification and commands
 
@@ -88,11 +106,11 @@ When information is uncertain or depends on a recent version, LYRA is instructed
 to check online, read official documentation, and link the sources actually read.
 If verification fails, it must say so rather than invent an answer.
 
-**Commands need your confirmation each time.** LYRA shows the exact command and
+When the selected mode requires confirmation, LYRA shows the exact command and
 its purpose before execution. Declining, closing, or pressing Escape runs nothing.
-Filesystem permission and a “yes” in chat do not authorize a command. Hyprland
-IPC queries/actions also request confirmation; managed file reads and backups
-use the filesystem permission.
+A “yes” in chat does not replace this dialog. In the default mode, Hyprland IPC
+queries/actions also request confirmation. Managed file reads use filesystem
+consent; copy-only mode blocks edits and backups.
 
 After your first filesystem approval, LYRA records the OS/distribution, version,
 kernel, architecture, username, session, and available package/desktop tools in a
@@ -100,8 +118,8 @@ private local profile. Basic OS discovery requires no commands. The profile
 is refreshed each approved session and can be viewed/refreshed in Settings.
 Installed tools are discovered from package metadata, desktop launchers, and your
 approved configuration files. Versions and configuration paths include their source;
-missing versions stay unknown. Additional package-manager queries always ask for
-command confirmation first.
+missing versions stay unknown. Additional package-manager queries follow the
+selected execution mode; copy-only mode displays them without running them.
 
 The local mini-RAG recalls relevant excerpts from your requests and clicked choices,
 along with installed tools that match the current question. It searches locally,
@@ -111,14 +129,14 @@ conversations and providers.
 
 ## Settings and backups
 
-- **⚙ Settings**: choose English or French, a model, and whether the avatar animates.
+- **⚙ Settings**: tabs for General, Access, Assistant, and Memory. Choose language, execution policy, model, SYSTEM context, and local memory preferences.
 - **SYSTEM context**: set your own instructions for all providers. Leave it empty to use LYRA’s default role.
 - **Local conversation memory**: disable recall and recording, or clear saved excerpts and start a new chat.
 - **⟲ History**: browse saved configurations and restore a backup.
 - **Tool details**: expand the link in the chat to inspect the operations performed.
 
 Live settings let you try changes. Once filesystem access is approved, LYRA requests a configuration backup before
-each message. The conversation lasts for the current window session; configuration
+each message when operations are enabled. The conversation lasts for the current window session; configuration
 backups and enabled local memory remain available after you close it.
 
 ## Need help?

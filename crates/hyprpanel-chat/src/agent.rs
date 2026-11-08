@@ -345,6 +345,8 @@ pub async fn run(
             }
             UserEvent::ConfigUpdated(new_cfg) => {
                 cfg = *new_cfg;
+                filesystem.set_operation_mode(cfg.operation_mode);
+                functions = available_functions(mcp.as_ref(), &filesystem);
                 translations = tr(cfg.lang());
                 ui::set_tr(&weak, translations.to_slint());
                 system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
@@ -378,7 +380,10 @@ pub async fn run(
                 ui::set_activity(&weak, "tools");
                 let turn = ledger.next_turn();
                 let preview: String = visible_text.chars().take(60).collect();
-                let backup = match mcp.as_ref().filter(|_| filesystem.approved()) {
+                let backup = match mcp
+                    .as_ref()
+                    .filter(|_| filesystem.allows_mcp("hypr_backup"))
+                {
                     Some(m) => {
                         let mut args = Map::new();
                         args.insert("label".into(), json!(format!("lyra-turn-{turn:03}")));
@@ -430,6 +435,10 @@ pub async fn run(
                 );
             }
             UserEvent::Restore(name) => {
+                if !filesystem.operation_mode().can_operate() {
+                    ui::append(&weak, "status", &translations.operation_copy_hint);
+                    continue;
+                }
                 if !filesystem.approved() {
                     ui::append(&weak, "error", &translations.fs_denied);
                     continue;
@@ -444,22 +453,23 @@ pub async fn run(
                 };
                 let mut args = Map::new();
                 args.insert("name".into(), json!(name));
-                if !approvals
-                    .request(
-                        &weak,
-                        format!(
-                            "hypr_restore_backup({})\nhypr_reload({{}})",
-                            Value::Object(args.clone())
-                        ),
-                        translations.command_restore.clone(),
-                    )
-                    .await
+                if filesystem.operation_mode().confirm_desktop()
+                    && !approvals
+                        .request(
+                            &weak,
+                            format!(
+                                "hypr_restore_backup({})\nhypr_reload({{}})",
+                                Value::Object(args.clone())
+                            ),
+                            translations.command_restore.clone(),
+                        )
+                        .await
                 {
                     ui::append(&weak, "status", &translations.command_declined);
                     ui::set_busy(&weak, false);
                     continue;
                 }
-                if !filesystem.approved() {
+                if !filesystem.allows_mcp("hypr_restore_backup") {
                     ui::set_busy(&weak, false);
                     continue;
                 }
@@ -576,6 +586,10 @@ async fn refresh_environment(
                 reason,
             };
             match crate::commands::run_inventory(request, filesystem, confirmation).await {
+                Ok(output) if output["status"] == "manual_only" => {
+                    show_manual_command(weak, &output, translations);
+                    inventory.record(query.manager, "manual_only", Vec::new(), None);
+                }
                 Ok(output) if output["status"] == "declined" => {
                     declined = true;
                     inventory.record(query.manager, "declined", Vec::new(), None);
@@ -671,7 +685,7 @@ fn available_functions(
     functions.push(crate::contrast::definition());
     functions.extend(crate::web::definitions());
     functions.extend(filesystem.tool_definitions());
-    if filesystem.approved() {
+    if filesystem.approved() || !filesystem.operation_mode().can_operate() {
         functions.push(crate::commands::definition());
     }
     functions
@@ -697,7 +711,9 @@ fn runtime_system(
             "NOT GRANTED"
         }
     ));
-    instructions.push_str(if filesystem.approved() {
+    instructions.push_str(if filesystem.approved() && !filesystem.operation_mode().can_operate() {
+        "Read-only analysis: use lyra_list_directory and lyra_read_file. Copy-only mode blocks file writes, all desktop/MCP operations, command execution, backups and restores. lyra_run_command only displays a command to copy."
+    } else if filesystem.approved() {
         "Use lyra_list_directory, lyra_read_file and lyra_write_file to work with configuration files. Never claim an edit succeeded without its tool result. Only write when the user has requested that change. Private LYRA files and generated files remain protected. Raw Lua and arbitrary dispatch tools are unavailable."
     } else {
         "No filesystem or desktop tools are authorized. Do not read, back up or modify local configuration through another mechanism. Ask the user to open Settings and allow filesystem access when needed. Explicitly attached files can still be discussed."
@@ -714,11 +730,12 @@ fn runtime_system(
         "\nCurrent UTC time: {}",
         timefmt::iso(std::time::SystemTime::now())
     ));
-    build_system_with_scope(
+    build_system_with_policy(
         cfg.lang(),
         Some(&instructions),
         &cfg.system_context,
         cfg.limit_wayland_scope,
+        cfg.operation_mode,
     )
 }
 
@@ -747,6 +764,22 @@ pub(crate) fn build_system_with_scope(
     server_instructions: Option<&str>,
     custom_context: &str,
     limit_wayland_scope: bool,
+) -> String {
+    build_system_with_policy(
+        lang,
+        server_instructions,
+        custom_context,
+        limit_wayland_scope,
+        crate::operations::Mode::ConfirmAll,
+    )
+}
+
+fn build_system_with_policy(
+    lang: Lang,
+    server_instructions: Option<&str>,
+    custom_context: &str,
+    limit_wayland_scope: bool,
+    operation_mode: crate::operations::Mode,
 ) -> String {
     let mut system = if custom_context.trim().is_empty() {
         if !limit_wayland_scope {
@@ -784,13 +817,39 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
         system.push_str(instructions);
     }
     system.push_str(&crate::contrast::instructions(lang));
-    system.push_str(crate::reliability::instructions(lang));
+    system.push_str(&crate::reliability::instructions_with_mode(
+        lang,
+        operation_mode,
+    ));
     if limit_wayland_scope {
         system.push_str(&crate::scope::instructions(lang));
     } else {
         system.push_str(crate::scope::unrestricted(lang));
     }
     system
+}
+
+fn show_manual_command(weak: &Weak<ChatWindow>, output: &Value, translations: &Tr) {
+    let command = output["command"].as_str().unwrap_or("");
+    let reason = output["reason"].as_str().unwrap_or("");
+    // Le bloc utilise le bouton Copier du moteur Markdown natif.
+    let fence = "`".repeat(
+        command
+            .split(|c| c != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(3),
+    );
+    ui::append(
+        weak,
+        "assistant",
+        format!(
+            "**{}**\n\n{reason}\n\n{fence}sh\n{command}\n{fence}",
+            translations.manual_command_notice
+        ),
+    );
 }
 
 async fn run_turn(
@@ -910,7 +969,12 @@ async fn run_turn(
                                 request.reason.clone(),
                             );
                             match crate::commands::run(request, filesystem, confirmation).await {
-                                Ok(value) => value.to_string(),
+                                Ok(value) => {
+                                    if value["status"] == "manual_only" {
+                                        show_manual_command(weak, &value, translations);
+                                    }
+                                    value.to_string()
+                                }
                                 Err(error) => json!({"error":error.to_string()}).to_string(),
                             }
                         }
@@ -926,7 +990,8 @@ async fn run_turn(
                     json!({"error":"Filesystem/desktop access is not authorized, or this raw tool is unavailable. Ask the user to review permissions in Settings."}).to_string()
                 } else if let Some(session) = session {
                     let args = parse_tool_arguments(&tc.arguments);
-                    if crate::commands::needs_mcp_approval(&tc.name)
+                    if filesystem.operation_mode().confirm_desktop()
+                        && crate::commands::needs_mcp_approval(&tc.name)
                         && !approvals
                             .request(
                                 weak,
@@ -936,7 +1001,7 @@ async fn run_turn(
                             .await
                     {
                         json!({"status":"declined","instruction":"The user declined this action. Do not retry or bypass with another tool."}).to_string()
-                    } else if !filesystem.approved() {
+                    } else if !filesystem.allows_mcp(&tc.name) {
                         json!({"error":"Permission revoked"}).to_string()
                     } else {
                         ui::set_activity(weak, "tools");

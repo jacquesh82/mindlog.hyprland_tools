@@ -319,36 +319,30 @@ fn main() -> anyhow::Result<()> {
         "un clic dans le panneau ne doit pas le fermer"
     );
     // Une édition doit modifier la propriété lue par le bouton Enregistrer.
-    click(&app, 295., 175.);
+    click(&app, 295., 225.);
     assert!(
         !app.get_cfg_animate_avatar(),
         "la préférence d’animation doit être modifiable"
     );
-    // Focus du panneau -> fermer -> langue -> animation -> périmètre.
-    for _ in 0..4 {
-        let key = slint::platform::Key::Tab;
-        app.window()
-            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
-        app.window()
-            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
-    }
-    app.window()
-        .dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
-    app.window()
-        .dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
+    // Les onglets natifs changent de panneau au clic.
+    click(&app, 445., 116.);
+    assert_eq!(app.get_settings_tab(), 1);
+    snapshot(&app, &window, &out.join("settings-access.png"), 1080, 800)?;
+    click(&app, 570., 116.);
+    assert_eq!(app.get_settings_tab(), 2);
+    snapshot(
+        &app,
+        &window,
+        &out.join("settings-assistant.png"),
+        1080,
+        800,
+    )?;
+    click(&app, 300., 160.);
     assert!(
         !app.get_cfg_limit_wayland_scope(),
-        "le périmètre doit pouvoir être désactivé au clavier"
+        "le périmètre doit rester modifiable dans Assistant"
     );
-    // Mémoire -> effacer -> autorisation FS -> modèle.
-    for _ in 0..4 {
-        app.window().dispatch_event(WindowEvent::KeyPressed {
-            text: slint::platform::Key::Tab.into(),
-        });
-        app.window().dispatch_event(WindowEvent::KeyReleased {
-            text: slint::platform::Key::Tab.into(),
-        });
-    }
+    click(&app, 400., 255.);
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
     });
@@ -1182,6 +1176,98 @@ fn main() -> anyhow::Result<()> {
         "Annuler l’effacement revient aux réglages"
     );
 
+    app.set_busy(false);
+    app.set_overlay("settings".into());
+    for lang in [i18n::Lang::Fr, i18n::Lang::En] {
+        app.set_tr(i18n::tr(lang).to_slint());
+        for tab in 0..4 {
+            app.set_settings_tab(tab);
+            for (width, height) in [(1080, 800), (480, 600)] {
+                snapshot(
+                    &app,
+                    &window,
+                    &out.join(format!(
+                        "settings-tabs-{}-{tab}-{width}.png",
+                        if lang == i18n::Lang::Fr { "fr" } else { "en" }
+                    )),
+                    width,
+                    height,
+                )?;
+            }
+        }
+        app.set_settings_tab(1);
+        for mode in 0..4 {
+            app.set_cfg_operation_mode(mode);
+            snapshot(
+                &app,
+                &window,
+                &out.join(format!(
+                    "settings-mode-{}-{mode}.png",
+                    if lang == i18n::Lang::Fr { "fr" } else { "en" }
+                )),
+                480,
+                600,
+            )?;
+        }
+    }
+    // Focus initial du dialogue -> fermer -> barre d'onglets native.
+    app.set_overlay("none".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("settings-keyboard-transition.png"),
+        480,
+        600,
+    )?;
+    app.set_settings_tab(0);
+    app.set_overlay("settings".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("settings-keyboard-start.png"),
+        480,
+        600,
+    )?;
+    for key in [
+        slint::platform::Key::Tab,
+        slint::platform::Key::Tab,
+        slint::platform::Key::RightArrow,
+        slint::platform::Key::Return,
+    ] {
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    }
+    assert_eq!(
+        app.get_settings_tab(),
+        1,
+        "les onglets doivent être accessibles au clavier"
+    );
+    app.set_cfg_operation_mode(0);
+    for key in [
+        slint::platform::Key::Tab,
+        slint::platform::Key::Tab,
+        slint::platform::Key::DownArrow,
+    ] {
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    }
+    assert_eq!(
+        app.get_cfg_operation_mode(),
+        1,
+        "le mode doit pouvoir être choisi au clavier"
+    );
+    app.set_overlay("none".into());
+    messages.set_vec(vec![MessageRow {
+        kind: "assistant".into(),
+        text: "Check the installed package version (command to copy; not executed).\n\n```sh\npacman -Q example-panel\n```".into(),
+        ..Default::default()
+    }]);
+    app.set_follow_output(true);
+    snapshot(&app, &window, &out.join("manual-commands.png"), 480, 600)?;
     println!(
         "Captures écrites dans {} ; interactions vérifiées.",
         out.display()

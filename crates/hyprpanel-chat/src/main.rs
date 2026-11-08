@@ -15,6 +15,7 @@ mod i18n;
 mod inventory;
 mod mcp;
 mod memory;
+mod operations;
 mod providers;
 mod reliability;
 mod rich_text;
@@ -105,12 +106,15 @@ fn main() -> anyhow::Result<()> {
     );
 
     let app = ChatWindow::new().context("création de la fenêtre (session Wayland active ?)")?;
+    filesystem.set_operation_mode(cfg.operation_mode);
     avatar::install(&app);
     app.set_provider_index(cfg.provider.index());
     app.set_model_label(cfg.model_label().into());
     app.set_animations_enabled(cfg.animate_avatar);
     app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
     app.set_cfg_memory_enabled(cfg.memory_enabled);
+    app.set_cfg_operation_mode(cfg.operation_mode.index());
+    app.set_operations_allowed(cfg.operation_mode.can_operate());
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_tr(i18n::tr(cfg.lang()).to_slint());
     app.set_fs_root(filesystem.root().to_string_lossy().to_string().into());
@@ -344,6 +348,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_cfg_animate_avatar(cfg.animate_avatar);
                 app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
                 app.set_cfg_memory_enabled(cfg.memory_enabled);
+                app.set_cfg_operation_mode(cfg.operation_mode.index());
                 app.set_cfg_system_context(cfg.system_context.clone().into());
                 app.set_settings_error("".into());
                 app.set_overlay("settings".into());
@@ -351,6 +356,7 @@ fn main() -> anyhow::Result<()> {
         });
 
         let weak_save = app.as_weak();
+        let filesystem_for_settings = filesystem.clone();
         app.on_save_settings(move || {
             let Some(app) = weak_save.upgrade() else {
                 return;
@@ -364,6 +370,10 @@ fn main() -> anyhow::Result<()> {
             cfg.animate_avatar = app.get_cfg_animate_avatar();
             cfg.limit_wayland_scope = app.get_cfg_limit_wayland_scope();
             cfg.memory_enabled = app.get_cfg_memory_enabled();
+            let Some(mode) = operations::Mode::from_index(app.get_cfg_operation_mode()) else {
+                return;
+            };
+            cfg.operation_mode = mode;
             cfg.system_context = app.get_cfg_system_context().trim().to_string();
             if cfg.system_context.chars().count() > chat_config::MAX_SYSTEM_CONTEXT_CHARS {
                 app.set_settings_error(app.get_tr().settings_context_invalid.clone());
@@ -393,6 +403,8 @@ fn main() -> anyhow::Result<()> {
             }
             match cfg.save() {
                 Ok(()) => {
+                    filesystem_for_settings.set_operation_mode(cfg.operation_mode);
+                    app.set_operations_allowed(cfg.operation_mode.can_operate());
                     *cfg_for_settings.lock().expect("cfg empoisonnée") = cfg.clone();
                     app.set_model_label(cfg.model_label().into());
                     app.set_animations_enabled(cfg.animate_avatar);

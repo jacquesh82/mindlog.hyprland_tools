@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
 pub const LIST_TOOL: &str = "lyra_list_directory";
@@ -21,6 +21,7 @@ pub struct FilesystemAccess {
     backups: PathBuf,
     private_directories: Vec<PathBuf>,
     approved: AtomicBool,
+    operation_mode: AtomicU8,
 }
 
 impl FilesystemAccess {
@@ -35,6 +36,7 @@ impl FilesystemAccess {
             backups,
             private_directories,
             approved: AtomicBool::new(false),
+            operation_mode: AtomicU8::new(0),
         }
     }
 
@@ -48,6 +50,13 @@ impl FilesystemAccess {
     }
     pub fn approved(&self) -> bool {
         self.approved.load(Ordering::Acquire)
+    }
+    pub fn operation_mode(&self) -> crate::operations::Mode {
+        crate::operations::Mode::from_index(self.operation_mode.load(Ordering::Acquire) as i32)
+            .unwrap_or_default()
+    }
+    pub fn set_operation_mode(&self, mode: crate::operations::Mode) {
+        self.operation_mode.store(mode as u8, Ordering::Release);
     }
     pub fn set_approved(&self, approved: bool) {
         self.approved.store(approved, Ordering::Release);
@@ -65,6 +74,7 @@ impl FilesystemAccess {
     // fichiers bornés. Les outils Hyprland spécialisés restent disponibles.
     pub fn allows_mcp(&self, name: &str) -> bool {
         self.approved()
+            && self.operation_mode().can_operate()
             && matches!(
                 name,
                 "hypr_status"
@@ -217,6 +227,10 @@ impl FilesystemAccess {
                 Ok(json!({"path":input,"sha256":Self::digest(&content),"content":content}))
             }
             WRITE_TOOL => {
+                ensure!(
+                    self.operation_mode().can_operate(),
+                    "Mode commandes à copier : modification de fichier désactivée. Fournissez les commandes sans les exécuter."
+                );
                 let path = self.resolve(input, true)?;
                 ensure!(
                     !matches!(
@@ -278,6 +292,10 @@ impl FilesystemAccess {
                 pending.write_all(content.as_bytes())?;
                 pending.as_file().sync_all()?;
                 self.require_approval()?;
+                ensure!(
+                    self.operation_mode().can_operate(),
+                    "Les opérations ont été désactivées"
+                );
                 if previous.is_some() {
                     pending.persist(&path).map_err(|e| e.error)?;
                 } else {
@@ -295,7 +313,7 @@ impl FilesystemAccess {
         if !self.approved() {
             return Vec::new();
         }
-        vec![
+        let mut definitions = vec![
             FunctionDefinition::new(
                 LIST_TOOL,
                 "Liste un dossier dans ~/.config (200 entrées maximum). Aucun fichier privé de LYRA n'est exposé.",
@@ -311,7 +329,11 @@ impl FilesystemAccess {
                 "Écrit un fichier UTF-8 dans ~/.config après demande explicite de l'utilisateur. Relisez le fichier et fournissez son sha256 actuel ; utilisez new pour un nouveau fichier dans un dossier existant. Une sauvegarde précède tout remplacement. monitors.lua/inputs.lua et les fichiers privés de LYRA sont protégés.",
                 json!({"type":"object","required":["path","content","expected_sha256"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"expected_sha256":{"type":"string"}}}),
             ),
-        ]
+        ];
+        if !self.operation_mode().can_operate() {
+            definitions.retain(|tool| tool.name != WRITE_TOOL);
+        }
+        definitions
     }
 }
 
@@ -324,6 +346,42 @@ mod tests {
         std::fs::create_dir(&root).unwrap();
         let access = FilesystemAccess::new(root, dir.path().join("backups"));
         (dir, access)
+    }
+
+    #[test]
+    fn copy_mode_keeps_reads_but_blocks_writes_backups_and_all_desktop_tools() {
+        let (_dir, fs) = fixture();
+        fs.set_approved(true);
+        fs.set_operation_mode(crate::operations::Mode::CopyOnly);
+        let path = fs.root().join("app.conf");
+        std::fs::write(&path, "before").unwrap();
+        let read = fs.call(READ_TOOL, &json!({"path":"app.conf"})).unwrap();
+        let out = fs.call(
+            WRITE_TOOL,
+            &json!({"path":"app.conf", "content":"after", "expected_sha256":read["sha256"]}),
+        );
+        assert!(out.is_err());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "before");
+        assert!(!fs.backups.exists());
+        for name in [
+            "hypr_status",
+            "hypr_backup",
+            "hypr_restore_backup",
+            "hypr_set_option_live",
+            "hypr_screenshot",
+        ] {
+            assert!(!fs.allows_mcp(name));
+        }
+        assert!(
+            fs.tool_definitions()
+                .iter()
+                .all(|tool| tool.name != WRITE_TOOL)
+        );
+        fs.set_operation_mode(crate::operations::Mode::FullAccess);
+        assert!(fs.allows_mcp("hypr_status"));
+        fs.set_approved(false);
+        assert!(!fs.allows_mcp("hypr_status"));
+        assert!(fs.call(READ_TOOL, &json!({"path":"app.conf"})).is_err());
     }
 
     #[test]

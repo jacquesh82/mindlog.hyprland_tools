@@ -1,4 +1,4 @@
-import { Button } from "std-widgets.slint";
+import { Button, ScrollView } from "std-widgets.slint";
 import { SwatchRow } from "choice-types.slint";
 
 export global Theme {
@@ -20,6 +20,25 @@ export global Theme {
 export global AvatarFrames {
     in-out property <image> open;
     in-out property <image> blink;
+}
+
+export component SettingsPage inherits ScrollView {
+    min-width: 0px;
+    min-height: 0px;
+    max-width: 16384px;
+    max-height: 16384px;
+    horizontal-scrollbar-policy: always-off;
+    content-width: self.visible-width;
+    content-height: content.preferred-height;
+    content := VerticalLayout {
+        width: root.visible-width;
+        height: self.preferred-height;
+        padding: 6px;
+        padding-top: 16px;
+        padding-right: 16px;
+        spacing: 10px;
+        @children
+    }
 }
 
 export component WorkProgress inherits VerticalLayout {

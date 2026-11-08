@@ -59,6 +59,8 @@ pub struct ChatConfig {
     pub limit_wayland_scope: bool,
     #[serde(default = "default_memory_enabled")]
     pub memory_enabled: bool,
+    #[serde(default)]
+    pub operation_mode: crate::operations::Mode,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -155,6 +157,7 @@ impl ChatConfig {
             system_context: String::new(),
             limit_wayland_scope: true,
             memory_enabled: true,
+            operation_mode: crate::operations::Mode::ConfirmAll,
             base_url: ZCODE_SUBSCRIPTION_URL.into(),
             api_key: String::new(),
             model: "GLM-5.3".into(),
@@ -254,6 +257,37 @@ fn restrict_permissions(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn execution_mode_migrates_safely_and_roundtrips_all_choices() {
+        use crate::operations::Mode;
+        let mut cfg = ChatConfig::defaults();
+        let old = cfg
+            .as_toml()
+            .lines()
+            .filter(|line| !line.starts_with("operation_mode"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            toml::from_str::<ChatConfig>(&old).unwrap().operation_mode,
+            Mode::ConfirmAll
+        );
+        for mode in [
+            Mode::ConfirmAll,
+            Mode::FullAccess,
+            Mode::SudoOnly,
+            Mode::CopyOnly,
+        ] {
+            cfg.operation_mode = mode;
+            assert_eq!(
+                toml::from_str::<ChatConfig>(&cfg.as_toml())
+                    .unwrap()
+                    .operation_mode,
+                mode
+            );
+        }
+        assert!(Mode::from_index(4).is_none());
+    }
 
     #[test]
     fn system_context_roundtrips_and_old_configs_keep_default_role() {

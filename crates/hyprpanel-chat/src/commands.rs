@@ -1,4 +1,4 @@
-//! Une approbation unique porte sur le contenu exact affiché, jamais sur la session.
+//! Exécution selon la politique choisie ; chaque confirmation porte sur le contenu exact.
 use crate::{ChatWindow, filesystem::FilesystemAccess};
 use anyhow::{Context, ensure};
 use langchain_rust::schemas::FunctionDefinition;
@@ -83,7 +83,7 @@ impl Approvals {
 pub fn definition() -> FunctionDefinition {
     FunctionDefinition::new(
         TOOL,
-        "Propose une commande shell pour traiter la demande de l'utilisateur, dans le périmètre actuellement autorisé. L'utilisateur voit la commande exacte, sa raison et confirme chaque exécution dans une boîte native ; un oui dans le chat ne suffit pas. Ne pas retenter après un refus. Pas de saisie interactive, timeout 60 s, sortie bornée. Aucune commande n'est exécutée pour détecter l'environnement automatiquement.",
+        "Propose une commande shell et sa raison. La politique d'exécution des réglages décide : tout confirmer, FULL access, confirmer sudo/élévations et commandes indirectes, ou commandes à copier sans exécution. Si une confirmation est requise, seul le dialogue natif l'autorise. Ne pas retenter après refus. Pas de saisie interactive, timeout 60 s, sortie bornée.",
         json!({"type":"object","required":["command","reason"],"properties":{"command":{"type":"string","description":"Script /bin/sh exact, sans placeholder ni secret. Une opération cohérente par demande."},"reason":{"type":"string","description":"But concret et effets attendus, risques ou privilèges nécessaires, dans la langue de l'utilisateur."}}}),
     )
 }
@@ -145,13 +145,23 @@ async fn run_with_limit<F: Future<Output = bool>>(
     confirmation: F,
     output_limit: u64,
 ) -> anyhow::Result<Value> {
+    let mode = filesystem.operation_mode();
+    if !mode.can_operate() {
+        return Ok(
+            json!({"status":"manual_only", "command":request.command, "reason":request.reason, "executed":false, "instruction":"Command not executed. The host displays a copyable shell block. Explain it if useful without repeating it, and never claim success. Do not bypass copy-only mode with any other tool."}),
+        );
+    }
     filesystem.require_approval()?;
-    if !confirmation.await {
+    if mode.confirm_command(&request.command) && !confirmation.await {
         return Ok(
             json!({"status":"declined","instruction":"The user declined. Do not execute, retry, split or rephrase this action to bypass refusal."}),
         );
     }
     filesystem.require_approval()?;
+    ensure!(
+        filesystem.operation_mode() == mode,
+        "Le mode d'exécution a changé ; proposez de nouveau l'action"
+    );
     let mut command = tokio::process::Command::new("/bin/sh");
     command
         .arg("-c")
@@ -285,5 +295,59 @@ mod tests {
             "tested"
         );
         assert!(Request::parse(&json!({"command":"x","reason":""})).is_err());
+    }
+    #[tokio::test]
+    async fn full_and_ordinary_sudo_mode_skip_confirmation_while_copy_mode_never_runs() {
+        use crate::operations::Mode;
+        let dir = tempfile::tempdir().unwrap();
+        let fs = FilesystemAccess::new(dir.path().into(), dir.path().join("backup"));
+        let args = json!({"command":"printf done > proof.txt", "reason":"test policy"});
+        fs.set_operation_mode(Mode::CopyOnly);
+        for inventory in [false, true] {
+            let request = Request::parse(&args).unwrap();
+            let output = if inventory {
+                run_inventory(request, &fs, async { panic!("copy mode must not ask") }).await
+            } else {
+                run(request, &fs, async { panic!("copy mode must not ask") }).await
+            }
+            .unwrap();
+            assert_eq!(output["status"], "manual_only");
+            assert_eq!(output["executed"], false);
+            assert_eq!(output["command"], args["command"]);
+            assert!(!dir.path().join("proof.txt").exists());
+        }
+        fs.set_approved(true);
+        for mode in [Mode::FullAccess, Mode::SudoOnly] {
+            fs.set_operation_mode(mode);
+            let out = run(Request::parse(&args).unwrap(), &fs, async {
+                panic!("ordinary command must not ask")
+            })
+            .await
+            .unwrap();
+            assert_eq!(out["success"], true);
+        }
+        fs.set_operation_mode(Mode::SudoOnly);
+        let args = json!({"command":"sudo touch privileged-proof", "reason":"test refusal"});
+        let out = run(Request::parse(&args).unwrap(), &fs, async { false })
+            .await
+            .unwrap();
+        assert_eq!(out["status"], "declined");
+        assert!(!dir.path().join("privileged-proof").exists());
+    }
+    #[tokio::test]
+    async fn a_policy_change_during_confirmation_prevents_execution() {
+        let dir = tempfile::tempdir().unwrap();
+        let fs = FilesystemAccess::new(dir.path().into(), dir.path().join("backup"));
+        fs.set_approved(true);
+        let request = Request::parse(&json!({"command":"touch proof", "reason":"test"})).unwrap();
+        assert!(
+            run(request, &fs, async {
+                fs.set_operation_mode(crate::operations::Mode::CopyOnly);
+                true
+            })
+            .await
+            .is_err()
+        );
+        assert!(!dir.path().join("proof").exists());
     }
 }
