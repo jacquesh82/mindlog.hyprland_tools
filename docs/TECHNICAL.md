@@ -44,12 +44,25 @@ The text is shared by all three providers and saved as `system_context` in
 `chat.toml`. Saving applies it to subsequent messages in the current conversation.
 
 An empty value uses LYRA’s default role in the selected interface language.
-A custom value replaces that role. LYRA still appends the visual-choice protocol
-and the MCP service instructions. The editor accepts up to 16,000 characters.
+A custom value replaces that role. LYRA still appends the Hyprland/Wayland
+scope, the visual-choice protocol, and the MCP service instructions. The editor accepts up to 16,000 characters.
 
 The context is sent as actual system instructions: a system message for Zcode,
 `--system-prompt` for Claude Code, and `baseInstructions` for Codex app-server.
 It is kept separate from the user’s conversation text.
+
+### Staying on topic
+
+A shared SYSTEM prompt limits LYRA to Hyprland, Wayland, and their associated
+tools: configuration and troubleshooting, monitors, input, appearance, bars,
+launchers, locking, screenshots, screen sharing, portals, and clipboard utilities.
+Related scripts and services, and questions about LYRA itself, are also in scope.
+
+A fully unrelated request receives a short redirect with no answer to that topic
+or model-requested tool calls. Mixed requests are answered only for their
+relevant part. The prompt distinguishes a chocolate desktop palette from a
+cake recipe and asks LYRA to stop an off-topic thread even if an earlier answer
+had drifted. Custom roles remain subject to this scope.
 
 ### Subscriptions and models
 
@@ -127,12 +140,15 @@ and `grim`. Its port check may report “occupied” when the service is already
 ```bash
 hyprpanel-chat check-providers
 hyprpanel-chat check-providers --live
+hyprpanel-chat check-providers --scope
 ```
 
 The first command checks the Coding Plan key and the official clients’ local
 login state. The live test makes real subscription requests, verifies that text
 fragments arrive before the final answer, checks a SYSTEM-context marker, and
-validates two clickable choices. It does not modify Hyprland.
+validates two clickable choices. `--scope` makes real model requests to check
+that a recipe request is redirected while a Wayland question is answered.
+These diagnostics do not modify Hyprland.
 
 ## Use MCP from another client
 

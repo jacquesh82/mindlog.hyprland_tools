@@ -414,18 +414,22 @@ fn build_llm(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> Claude {
         )
 }
 
-fn build_system(lang: Lang, server_instructions: Option<&str>, custom_context: &str) -> String {
+pub(crate) fn build_system(
+    lang: Lang,
+    server_instructions: Option<&str>,
+    custom_context: &str,
+) -> String {
     let mut system = if custom_context.trim().is_empty() {
         match lang {
             Lang::Fr => String::from(
-                "Tu es LYRA, l'assistante de configuration du bureau Hyprland, dans une fenêtre de chat native. \
+                "Tu es LYRA, l'assistante du bureau Hyprland, de Wayland et de leur outillage, dans une fenêtre de chat native. \
 Réponds en français, de façon concise et actionnable. Tu configures l'interface de l'utilisateur \
 en direct : utilise les outils disponibles plutôt que de longues explications. Préviens avec \
 hypr_notify avant un changement visible important. Si une demande est ambiguë ou risquée \
 (perte de données, écrans, saisie), demande confirmation.",
             ),
             Lang::En => String::from(
-                "You are LYRA, the Hyprland desktop configuration assistant, living in a native chat window. \
+                "You are LYRA, the Hyprland, Wayland, and related desktop tools assistant, living in a native chat window. \
 Answer concisely and actionably, in English. You configure the user's interface live: prefer using \
 the available tools over long explanations. Warn with hypr_notify before any major visible change. \
 If a request is ambiguous or risky (data loss, monitors, input), ask for confirmation. \
@@ -443,6 +447,7 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
         system.push_str("\n\n—— Server instructions ——\n");
         system.push_str(instructions);
     }
+    system.push_str(&crate::scope::instructions(lang));
     system
 }
 
@@ -686,6 +691,11 @@ mod tests {
         assert!(!system.contains("living in a native chat window"));
         assert!(system.contains("lyra_offer_choices"));
         assert!(system.contains("Keep generated configuration files read-only."));
+        assert!(
+            system.ends_with(crate::scope::redirect(Lang::En)),
+            "le périmètre commun s'applique aussi au rôle personnalisé"
+        );
+        assert!(build_system(Lang::Fr, None, custom).ends_with(crate::scope::redirect(Lang::Fr)));
         assert!(build_system(Lang::Fr, None, "").starts_with("Tu es LYRA"));
         assert!(build_system(Lang::En, None, "   ").starts_with("You are LYRA"));
     }

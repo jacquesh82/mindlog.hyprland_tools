@@ -10,6 +10,7 @@ mod i18n;
 mod mcp;
 mod providers;
 mod rich_text;
+mod scope;
 mod ui;
 
 use anyhow::Context;
@@ -24,9 +25,10 @@ USAGE
   hyprpanel-chat init      Crée ~/.config/hyprpanel/chat.toml (clé reprise de
                            la config Zcode si disponible) et affiche l'état
   hyprpanel-chat --help    Cette aide
-  hyprpanel-chat check-providers [--live]
+  hyprpanel-chat check-providers [--live] [--scope]
                            Vérifie les connexions ; --live teste les trois
                            abonnements et les choix sans modifier le bureau
+                           --scope teste le périmètre par de vrais appels
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -38,6 +40,7 @@ fn main() -> anyhow::Result<()> {
             return tokio::runtime::Runtime::new()?.block_on(providers::diagnose(
                 &cfg,
                 args.iter().any(|a| a == "--live"),
+                args.iter().any(|a| a == "--scope"),
             ));
         }
         Some("--help") | Some("-h") | Some("help") => {

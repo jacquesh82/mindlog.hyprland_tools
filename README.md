@@ -6,6 +6,9 @@ LYRA is a native chat app for exploring your setup, trying desktop settings,
 and choosing a look that suits you. It works with your existing **Zcode,
 Claude Code, or Codex subscription**.
 
+Its SYSTEM context keeps the conversation focused on **Hyprland, Wayland, and
+their related tools**. Unrelated requests receive a brief redirect.
+
 ![LYRA interface with desktop suggestions, chat, and subscription selector](docs/images/lyra.png)
 
 ## What you can ask
