@@ -227,7 +227,7 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
         Ok(url) => match McpSession::connect(&url).await {
             Ok(session) => {
                 let n = session.tools().len();
-                ui::set_status(&weak, format!("MCP : {n} outils"));
+                ui::set_status(&weak, translations.mcp_tools.replace("{}", &n.to_string()));
                 Some(session)
             }
             Err(e) => {
@@ -271,6 +271,7 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
     let mut system = build_system(
         cfg.lang(),
         mcp.as_ref().and_then(|m| m.instructions()).as_deref(),
+        &cfg.system_context,
     );
     let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
@@ -302,6 +303,7 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                 system = build_system(
                     cfg.lang(),
                     mcp.as_ref().and_then(|m| m.instructions()).as_deref(),
+                    &cfg.system_context,
                 );
                 convo[0] = Message::new_system_message(system.clone());
                 llm = build_llm(&cfg, &functions);
@@ -412,22 +414,26 @@ fn build_llm(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> Claude {
         )
 }
 
-fn build_system(lang: Lang, server_instructions: Option<&str>) -> String {
-    let mut system = match lang {
-        Lang::Fr => String::from(
-            "Tu es LYRA, l'assistante de configuration du bureau Hyprland, dans une fenêtre de chat native. \
+fn build_system(lang: Lang, server_instructions: Option<&str>, custom_context: &str) -> String {
+    let mut system = if custom_context.trim().is_empty() {
+        match lang {
+            Lang::Fr => String::from(
+                "Tu es LYRA, l'assistante de configuration du bureau Hyprland, dans une fenêtre de chat native. \
 Réponds en français, de façon concise et actionnable. Tu configures l'interface de l'utilisateur \
 en direct : utilise les outils disponibles plutôt que de longues explications. Préviens avec \
 hypr_notify avant un changement visible important. Si une demande est ambiguë ou risquée \
 (perte de données, écrans, saisie), demande confirmation.",
-        ),
-        Lang::En => String::from(
-            "You are LYRA, the Hyprland desktop configuration assistant, living in a native chat window. \
+            ),
+            Lang::En => String::from(
+                "You are LYRA, the Hyprland desktop configuration assistant, living in a native chat window. \
 Answer concisely and actionably, in English. You configure the user's interface live: prefer using \
 the available tools over long explanations. Warn with hypr_notify before any major visible change. \
 If a request is ambiguous or risky (data loss, monitors, input), ask for confirmation. \
 (The server instructions below are written in French.)",
-        ),
+            ),
+        }
+    } else {
+        custom_context.trim().to_string()
     };
     system.push_str(match lang {
         Lang::Fr => "\n\nCHOIX VISUELS : dès qu'une préférence ou une décision doit venir de l'utilisateur, utilise lyra_offer_choices pour afficher des options cliquables (texte, couleurs/palettes, images locales existantes ou schémas SVG autonomes). Pour les goûts et couleurs, consulte d'abord lyra_palette_catalog : il fournit une sélection Color Hunt avec les liens sources. Reprends les couleurs exactes et source_url ; ne présente pas une palette inventée comme provenant d'un site. Après avoir proposé les choix, attends le message user_choice issu du clic. Le clic exprime une préférence, pas une autorisation générale : respecte les confirmations et sauvegardes nécessaires avant de modifier le bureau. Les détails d'outils sont repliés dans l'interface ; garde tes messages visibles courts et utiles.",
@@ -451,6 +457,7 @@ async fn run_turn(
     translations: &Tr,
     weak: &Weak<ChatWindow>,
 ) -> anyhow::Result<()> {
+    cfg.validate_subscription().map_err(anyhow::Error::msg)?;
     let (message, notes) = build_user_message(user_text, files, &|p| std::fs::read(p));
     for note in notes {
         ui::append(weak, "error", note);
@@ -463,9 +470,28 @@ async fn run_turn(
         let (text, result) = if cfg.provider == crate::chat_config::Provider::Zcode {
             stream_turn(llm, convo, weak).await?
         } else {
-            let result = crate::providers::generate(cfg, functions, convo).await?;
+            let mut row = None;
+            let mut last_flush = std::time::Instant::now();
+            let result = crate::providers::generate(cfg, functions, convo, &mut |partial| {
+                if partial.is_empty() {
+                    return;
+                }
+                if let Some(index) = row {
+                    if last_flush.elapsed() >= Duration::from_millis(33) {
+                        ui::set_row(weak, index, "assistant", partial);
+                        last_flush = std::time::Instant::now();
+                    }
+                } else {
+                    ui::set_activity(weak, "writing");
+                    row = Some(ui::append(weak, "assistant", partial));
+                    last_flush = std::time::Instant::now();
+                }
+            })
+            .await?;
             let text = result.generation.clone();
-            if !text.is_empty() {
+            if let Some(index) = row {
+                ui::set_row(weak, index, "assistant", &text);
+            } else if !text.is_empty() {
                 ui::set_activity(weak, "writing");
                 ui::append(weak, "assistant", &text);
             }
@@ -647,6 +673,22 @@ pub fn truncate_str(s: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_context_replaces_role_and_retains_tool_instructions() {
+        let custom = "You are an accessibility-focused desktop assistant.";
+        let system = build_system(
+            Lang::En,
+            Some("Keep generated configuration files read-only."),
+            custom,
+        );
+        assert!(system.starts_with(custom));
+        assert!(!system.contains("living in a native chat window"));
+        assert!(system.contains("lyra_offer_choices"));
+        assert!(system.contains("Keep generated configuration files read-only."));
+        assert!(build_system(Lang::Fr, None, "").starts_with("Tu es LYRA"));
+        assert!(build_system(Lang::En, None, "   ").starts_with("You are LYRA"));
+    }
 
     #[test]
     fn classification_pieces() {

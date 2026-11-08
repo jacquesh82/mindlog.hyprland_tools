@@ -2,14 +2,14 @@
 //!
 //! Le CLI produit une réponse structurée ; LYRA reste propriétaire de la boucle
 //! d'outils (MCP, sauvegardes, validations, choix cliquables). Aucun shell ni MCP
-//! personnel n'est confié au CLI. Zcode conserve le transport LangChain SSE.
+//! personnel n'est confié au CLI. Zcode utilise le Coding Plan via LangChain SSE.
 
 use crate::chat_config::{ChatConfig, Provider};
 use anyhow::{Context, bail, ensure};
 use base64::Engine as _;
 use langchain_rust::{
     language_models::GenerateResult,
-    schemas::{FunctionDefinition, Message, ToolCall},
+    schemas::{FunctionDefinition, Message, MessageType, ToolCall},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -18,6 +18,9 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
 };
+
+mod codex;
+mod streaming;
 
 const CLI_TIMEOUT: Duration = Duration::from_secs(180);
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
@@ -177,16 +180,19 @@ pub async fn check_login(provider: Provider) -> anyhow::Result<()> {
 /// Diagnostic volontaire, sans MCP ni modification du bureau. --live vérifie
 /// aussi qu'un appel d'outil structuré traverse réellement chaque abonnement.
 pub async fn diagnose(cfg: &ChatConfig, live: bool) -> anyhow::Result<()> {
+    use futures_util::StreamExt;
     use langchain_rust::{
-        language_models::{llm::LLM, options::CallOptions},
+        language_models::{LLMEvent, llm::LLM, options::CallOptions},
         llm::claude::Claude,
     };
     let functions = crate::choices::tool_definitions().to_vec();
     let messages = vec![
         Message::new_system_message(
-            "Tu es LYRA. Pour ce diagnostic, réponds uniquement en appelant lyra_offer_choices avec question='Test LYRA' et deux options {id:'a',label:'A'} et {id:'b',label:'B'}. N'appelle aucun autre outil.",
+            "This is a SYSTEM-context and streaming diagnostic. Begin the visible reply with LYRA-SYSTEM-OK, then write eight short sentences about a readable desktop. After that, call lyra_offer_choices with question='Test LYRA' and exactly two options {id:'a',label:'A'} and {id:'b',label:'B'}. Do not call any other tool.",
         ),
-        Message::new_human_message("Propose ces deux choix de test sans modifier le bureau."),
+        Message::new_human_message(
+            "Please reply and offer the two test choices. Do not modify the desktop.",
+        ),
     ];
     let mut failures = 0;
     for provider in [Provider::Zcode, Provider::ClaudeCode, Provider::Codex] {
@@ -194,6 +200,7 @@ pub async fn diagnose(cfg: &ChatConfig, live: bool) -> anyhow::Result<()> {
         active.provider = provider;
         let outcome = async {
             if provider == Provider::Zcode {
+                active.validate_subscription().map_err(anyhow::Error::msg)?;
                 ensure!(
                     !active.api_key.is_empty(),
                     "clé du Coding Plan Zcode absente"
@@ -202,25 +209,59 @@ pub async fn diagnose(cfg: &ChatConfig, live: bool) -> anyhow::Result<()> {
                 check_login(provider).await?;
             }
             if live {
+                let mut fragments = Vec::new();
                 let result = if provider == Provider::Zcode {
-                    tokio::time::timeout(
-                        CLI_TIMEOUT,
-                        Claude::new()
-                            .with_model(active.model.clone())
-                            .with_base_url(active.base_url.clone())
-                            .with_api_key(active.api_key.clone())
-                            .with_options(
-                                CallOptions::new()
-                                    .with_functions(functions.clone())
-                                    .with_max_tokens(1024),
-                            )
-                            .generate(&messages),
-                    )
-                    .await
-                    .context("délai de réponse dépassé")??
+                    let model = Claude::new()
+                        .with_model(active.model.clone())
+                        .with_base_url(active.base_url.clone())
+                        .with_api_key(active.api_key.clone())
+                        .with_options(
+                            CallOptions::new()
+                                .with_functions(functions.clone())
+                                .with_max_tokens(2048),
+                        );
+                    let mut events = model.generate_stream(&messages);
+                    let mut text = String::new();
+                    let mut final_result = None;
+                    loop {
+                        let next = tokio::time::timeout(CLI_TIMEOUT, events.next())
+                            .await
+                            .context("délai de réponse dépassé")?;
+                        let Some(event) = next else { break };
+                        match event? {
+                            LLMEvent::Text(delta) if !delta.is_empty() => {
+                                text.push_str(&delta);
+                                fragments.push(text.clone());
+                            }
+                            LLMEvent::Done(result) => final_result = Some(result),
+                            _ => {}
+                        }
+                    }
+                    let mut result = final_result.context("réponse finale absente")?;
+                    result.generation = text;
+                    result
                 } else {
-                    generate(&active, &functions, &messages).await?
+                    generate(&active, &functions, &messages, &mut |text| {
+                        fragments.push(text.to_string())
+                    })
+                    .await?
                 };
+                ensure!(
+                    result.generation.starts_with("LYRA-SYSTEM-OK"),
+                    "le contexte SYSTEM n'a pas été respecté"
+                );
+                ensure!(
+                    fragments.len() >= 2
+                        && fragments
+                            .first()
+                            .is_some_and(|first| first.len() < result.generation.len()),
+                    "le texte n'a pas été reçu progressivement avant la réponse finale"
+                );
+                println!(
+                    "{} : {} fragments de texte avant la réponse finale",
+                    provider.label(),
+                    fragments.len()
+                );
                 let call = result
                     .tool_calls
                     .iter()
@@ -237,7 +278,7 @@ pub async fn diagnose(cfg: &ChatConfig, live: bool) -> anyhow::Result<()> {
                 "{} : OK ({})",
                 provider.label(),
                 if live {
-                    "réponse et choix cliquables"
+                    "abonnement, streaming, SYSTEM et choix cliquables"
                 } else {
                     "connexion locale"
                 }
@@ -257,8 +298,18 @@ fn prepare_prompt(
     messages: &[Message],
     functions: &[FunctionDefinition],
     dir: &Path,
-) -> anyhow::Result<(String, Vec<Value>, Vec<std::path::PathBuf>)> {
-    let mut history = messages.to_vec();
+) -> anyhow::Result<(String, String, Vec<Value>, Vec<std::path::PathBuf>)> {
+    let mut history: Vec<_> = messages
+        .iter()
+        .filter(|m| !matches!(m.message_type, MessageType::SystemMessage))
+        .cloned()
+        .collect();
+    let mut system = messages
+        .iter()
+        .filter(|m| matches!(m.message_type, MessageType::SystemMessage))
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let mut images = Vec::new();
     let mut paths = Vec::new();
     for message in &mut history {
@@ -307,12 +358,20 @@ fn prepare_prompt(
             );
         }
     }
-    let prompt = json!({
-        "instruction":"Act as the assistant described by the system messages in this conversation. Return exactly the requested JSON schema. Put the user-facing answer in text, in the requested language, using Markdown. To use an available LYRA tool, return its name and JSON-encoded arguments in tool_calls. The host executes those calls and sends their results in the next request. Do not simulate tool results or claim changes were applied without a successful tool result. Use only the listed tool names. If no tool is needed, tool_calls is empty. After lyra_offer_choices, wait for the user's click. Do not access the filesystem or run built-in tools.",
-        "tools":functions.iter().map(|f| json!({"name":f.name,"description":f.description,"parameters":f.parameters})).collect::<Vec<_>>(),
-        "conversation":history
-    }).to_string();
-    Ok((prompt, images, paths))
+    system.push_str("\n\nRESPONSE PROTOCOL: Return exactly the requested JSON schema. Put the user-facing answer in text, in the requested language, using Markdown. To use a LYRA tool, return its name and JSON-encoded arguments in tool_calls. The host executes these calls and supplies their results in the next request. Never simulate a result or claim a change succeeded without its tool result. Use only the listed tools. If none is needed, tool_calls is empty. After lyra_offer_choices, wait for the user’s click. Do not use built-in tools or access files. Available LYRA tools:\n");
+    system.push_str(
+        &json!(
+            functions
+                .iter()
+                .map(
+                    |f| json!({"name":f.name,"description":f.description,"parameters":f.parameters})
+                )
+                .collect::<Vec<_>>()
+        )
+        .to_string(),
+    );
+    let prompt = json!({"conversation":history}).to_string();
+    Ok((system, prompt, images, paths))
 }
 
 /// Lance un seul appel de modèle. La boucle de décision reste dans agent.rs.
@@ -320,10 +379,14 @@ pub async fn generate(
     cfg: &ChatConfig,
     functions: &[FunctionDefinition],
     messages: &[Message],
+    on_text: &mut impl FnMut(&str),
 ) -> anyhow::Result<GenerateResult> {
+    if cfg.provider == Provider::Codex {
+        return codex::generate(cfg, functions, messages, on_text).await;
+    }
     check_login(cfg.provider).await?;
     let dir = private_dir()?;
-    let (prompt, images, paths) = prepare_prompt(messages, functions, dir.path())?;
+    let (system, prompt, images, _paths) = prepare_prompt(messages, functions, dir.path())?;
     let schema = reply_schema(functions).to_string();
     let mut cmd = command(cfg.provider);
     cmd.current_dir(dir.path());
@@ -334,6 +397,9 @@ pub async fn generate(
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--include-partial-messages",
+                "--system-prompt",
+                &system,
                 "--no-session-persistence",
                 "--setting-sources",
                 "",
@@ -359,40 +425,7 @@ pub async fn generate(
             content.extend(images);
             json!({"type":"user","message":{"role":"user","content":content}}).to_string() + "\n"
         }
-        Provider::Codex => {
-            let schema_path = dir.path().join("reply-schema.json");
-            std::fs::write(&schema_path, schema)?;
-            cmd.args([
-                "exec",
-                "--json",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
-                "--color",
-                "never",
-                "-c",
-                "features.shell_tool=false",
-                "-c",
-                "features.multi_agent=false",
-                "-c",
-                "features.image_generation=false",
-                "-c",
-                "web_search=\"disabled\"",
-                "--output-schema",
-            ])
-            .arg(schema_path);
-            if !cfg.codex_model.is_empty() {
-                cmd.args(["--model", &cfg.codex_model]);
-            }
-            for path in paths {
-                cmd.arg("--image").arg(path);
-            }
-            cmd.arg("-");
-            prompt
-        }
+        Provider::Codex => unreachable!("Codex uses app-server streaming"),
         Provider::Zcode => unreachable!(),
     };
     let mut child = cmd
@@ -411,23 +444,30 @@ pub async fn generate(
         let mut count = 0;
         let mut reply = None;
         let mut failed = false;
+        let mut partial_json = String::new();
+        let mut output_index = None;
+        let mut progress = streaming::TextStream::new(on_text);
         while let Some(line) = lines.next_line().await? {
             count += line.len();
             ensure!(count <= OUTPUT_LIMIT, "sortie du client trop volumineuse");
             let Ok(event) = serde_json::from_str::<Value>(&line) else { continue };
-            match cfg.provider {
-                Provider::ClaudeCode if event["type"] == "result" => {
-                    failed = event["is_error"] == true;
-                    reply = event.get("structured_output").cloned();
-                    if reply.is_none() && !failed {
-                        reply = event["result"].as_str().and_then(|s| serde_json::from_str(s).ok());
-                    }
+            if event["type"] == "stream_event" {
+                let detail = &event["event"];
+                if detail["type"] == "content_block_start" && detail["content_block"]["name"] == "StructuredOutput" {
+                    output_index = detail["index"].as_u64();
+                    partial_json.clear();
+                } else if detail["type"] == "content_block_delta" && detail["delta"]["type"] == "input_json_delta" && output_index.is_some() && detail["index"].as_u64() == output_index {
+                    if let Some(delta) = detail["delta"]["partial_json"].as_str() { partial_json.push_str(delta); progress.update(&partial_json); }
+                } else if detail["type"] == "content_block_delta" && detail["delta"]["type"] == "text_delta" && output_index.is_none() {
+                    if let Some(delta) = detail["delta"]["text"].as_str() { partial_json.push_str(delta); progress.update(&partial_json); }
                 }
-                Provider::Codex if event["type"] == "item.completed" && event["item"]["type"] == "agent_message" => {
-                    reply = event["item"]["text"].as_str().and_then(|s| serde_json::from_str(s).ok());
+            }
+            if event["type"] == "result" {
+                failed = event["is_error"] == true;
+                reply = event.get("structured_output").cloned();
+                if reply.is_none() && !failed {
+                    reply = event["result"].as_str().and_then(|s| serde_json::from_str(s).ok());
                 }
-                Provider::Codex if event["type"] == "turn.failed" || event["type"] == "error" => { failed = true; }
-                _ => {}
             }
         }
         let status = child.wait().await?;
@@ -441,6 +481,18 @@ pub async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn system_context_is_sent_as_system_not_inside_user_history() {
+        let dir = private_dir().unwrap();
+        let messages = vec![
+            Message::new_system_message("SYSTEM-MARKER"),
+            Message::new_human_message("hello"),
+        ];
+        let (system, prompt, _, _) = prepare_prompt(&messages, &[], dir.path()).unwrap();
+        assert!(system.starts_with("SYSTEM-MARKER"));
+        assert!(!prompt.contains("SYSTEM-MARKER"));
+        assert!(prompt.contains("hello"));
+    }
     #[test]
     fn cli_reply_requires_known_tool_and_object_arguments() {
         let tools = vec![FunctionDefinition::new(
@@ -487,7 +539,7 @@ mod tests {
         let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6YQAAAAASUVORK5CYII=";
         let messages =
             vec![Message::new_human_message("Commente cette image").with_images(vec![data])];
-        let (prompt, images, paths) = prepare_prompt(&messages, &[], dir.path()).unwrap();
+        let (_system, prompt, images, paths) = prepare_prompt(&messages, &[], dir.path()).unwrap();
         assert!(
             !prompt.contains(data),
             "le base64 ne doit pas être envoyé comme du texte"

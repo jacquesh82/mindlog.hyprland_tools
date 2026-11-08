@@ -1,27 +1,29 @@
 # LYRA
 
-**Réglez votre bureau Hyprland en discutant.**
+**Configure your Hyprland desktop through conversation.**
 
-LYRA est une application de chat native pour explorer votre configuration,
-essayer des réglages et choisir l’apparence de votre bureau. Elle fonctionne
-avec **Zcode, Claude Code ou Codex**.
+LYRA is a native chat app for exploring your setup, trying desktop settings,
+and choosing a look that suits you. It works with your existing **Zcode,
+Claude Code, or Codex subscription**.
 
-![Interface de LYRA : suggestions de réglages, chat et sélecteur d’abonnement](docs/images/lyra.png)
+![LYRA interface with desktop suggestions, chat, and subscription selector](docs/images/lyra.png)
 
-## Ce que vous pouvez lui demander
+## What you can ask
 
-- « Montre l’état de mes écrans et mes raccourcis. »
-- « Passe les gaps à 10 pour essayer, puis remets-les comme avant. »
-- « Propose-moi trois palettes de couleurs et laisse-moi choisir. »
+- “Show my monitor setup and keyboard shortcuts.”
+- “Try setting the gaps to 10, then put them back.”
+- “Suggest three color palettes and let me choose.”
 
-Vous pouvez cliquer sur les propositions de LYRA : textes, couleurs, images ou
-schémas. Le bouton **Joindre** permet aussi d’envoyer vos images et fichiers texte.
+Click LYRA’s suggestions to choose text, colors, images, or diagrams.
+Use **Attach** to send images and text files along with your message.
+Responses appear progressively as LYRA writes, with a visible thinking indicator
+while it prepares its answer.
 
-## Installer depuis les sources
+## Install from source
 
-Il vous faut **Linux avec Hyprland, Git, Rust/Cargo et systemd**.
-Le projet est testé avec Hyprland **0.57.1 et sa configuration Lua**.
-Installez aussi `grim` pour les captures d’écran et `zenity` pour joindre des fichiers.
+You need **Linux with Hyprland, Git, Rust/Cargo, and systemd**.
+The project has been tested with **Hyprland 0.57.1 and its Lua configuration**.
+Install `grim` for screenshots and `zenity` for file attachments.
 
 ```bash
 git clone https://github.com/jacquesh82/mindlog.hyprland_tools.git
@@ -30,49 +32,46 @@ cd mindlog.hyprland_tools
 ~/.local/bin/hyprpanel-chat
 ```
 
-Le script compile l’application, installe les binaires dans `~/.local/bin`
-et démarre le service local nécessaire aux réglages du bureau.
+The installer builds the application, installs both binaries in `~/.local/bin`,
+and starts the local service that communicates with your desktop.
 
-## Choisir votre abonnement
+## Choose your subscription
 
-Dans le menu près d’**Envoyer**, choisissez le fournisseur à utiliser.
-Votre choix est mémorisé et vous pouvez le changer entre deux messages.
+Use the selector next to **Send** to choose a provider. Your selection is saved,
+and you can switch between messages.
 
-| Fournisseur | Comment le connecter |
+| Provider | How to connect |
 | --- | --- |
-| **Zcode** | La clé du Coding Plan Z.ai est reprise de votre configuration Zcode si elle est disponible. Sinon, renseignez-la dans les réglages de LYRA. |
-| **Claude Code** | Installez le client `claude`, puis connectez votre abonnement avec `claude auth login`. |
-| **Codex** | Installez le client `codex`, puis connectez votre compte ChatGPT avec `codex login`. |
+| **Zcode** | LYRA imports your GLM Coding Plan key from the Zcode configuration when available. Otherwise, enter your plan key in LYRA’s settings. |
+| **Claude Code** | Install the official `claude` client and sign in to your subscription with `claude auth login`. |
+| **Codex** | Install the official `codex` client and sign in with your ChatGPT account using `codex login`. |
 
-Avec Zcode, le texte apparaît progressivement. Avec Claude Code et Codex,
-la réponse s’affiche une fois validée ; l’indicateur de réflexion reste visible
-pendant l’attente.
+All three modes use the subscription connection and stream their text into the
+chat. LYRA does not automatically fall back to a pay-as-you-go API.
 
-## Réglages et sauvegardes
+## Settings and backups
 
-- **⚙ Réglages** : langue français/anglais, modèle et animation de l’avatar.
-- **⟲ Historique** : retrouvez les sauvegardes et restaurez une configuration.
-- **Détails des outils** : dépliez le lien dans le chat si vous souhaitez voir les opérations effectuées.
+- **⚙ Settings**: choose English or French, a model, and whether the avatar animates.
+- **SYSTEM context**: set your own instructions for all providers. Leave it empty to use LYRA’s default role.
+- **⟲ History**: browse saved configurations and restore a backup.
+- **Tool details**: expand the link in the chat to inspect the operations performed.
 
-Les réglages à chaud servent à tester des changements. Une sauvegarde de la
-configuration est demandée avant chaque message.
+Live settings let you try changes. LYRA requests a configuration backup before
+each message. The conversation lasts for the current window session; configuration
+backups remain available after you close it.
 
-La conversation est conservée le temps de la fenêtre. Les sauvegardes de
-configuration, elles, restent disponibles après la fermeture.
+## Need help?
 
-## Besoin d’aide ?
-
-Le bouton **?** dans LYRA présente les fonctions et le fonctionnement du chat.
-Pour vérifier vos connexions :
+The **?** button explains how the chat works. To check provider connections:
 
 ```bash
 ~/.local/bin/hyprpanel-chat check-providers
 ```
 
-Le [guide technique](docs/TECHNICAL.md) détaille le dépannage, la configuration,
-l’utilisation du serveur MCP et les commandes pour contribuer au projet.
+See the [technical guide](docs/TECHNICAL.md) for troubleshooting, configuration,
+MCP integration, and development commands.
 
-## Licences
+## Licenses
 
-L’application LYRA (`hyprpanel-chat`) est sous **GPL-3.0-only**.
-Le cœur et le serveur (`hyprpanel-core`, `hyprpanel-server`) sont sous **MIT**.
+The LYRA application (`hyprpanel-chat`) is licensed under **GPL-3.0-only**.
+The core and server (`hyprpanel-core`, `hyprpanel-server`) are licensed under **MIT**.

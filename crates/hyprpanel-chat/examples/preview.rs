@@ -145,8 +145,27 @@ fn main() -> anyhow::Result<()> {
     snapshot(&app, &window, &out.join("welcome-compact.png"), 480, 720)?;
     snapshot(&app, &window, &out.join("welcome-minimum.png"), 480, 600)?;
     app.set_tr(i18n::tr(i18n::Lang::En).to_slint());
+    app.set_status(
+        i18n::tr(i18n::Lang::En)
+            .mcp_tools
+            .replace("{}", "20")
+            .into(),
+    );
     snapshot(&app, &window, &out.join("welcome-english.png"), 1080, 800)?;
+    snapshot(
+        &app,
+        &window,
+        &out.join("welcome-english-wide.png"),
+        1366,
+        768,
+    )?;
     app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+    app.set_status(
+        i18n::tr(i18n::Lang::Fr)
+            .mcp_tools
+            .replace("{}", "20")
+            .into(),
+    );
 
     messages.set_vec(vec![
         MessageRow { kind: "user".into(), text: "Peux-tu rendre mon bureau un peu plus aéré ?".into(), ..Default::default() },
@@ -275,12 +294,12 @@ fn main() -> anyhow::Result<()> {
         "un clic dans le panneau ne doit pas le fermer"
     );
     // Une édition doit modifier la propriété lue par le bouton Enregistrer.
-    click(&app, 295., 265.);
+    click(&app, 295., 175.);
     assert!(
         !app.get_cfg_animate_avatar(),
         "la préférence d’animation doit être modifiable"
     );
-    click(&app, 450., 322.);
+    click(&app, 450., 232.);
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
     });
@@ -304,6 +323,39 @@ fn main() -> anyhow::Result<()> {
         "preview-model",
         "la saisie doit mettre à jour les réglages"
     );
+    // Modèle -> endpoint en lecture seule -> tokens -> clé -> contexte SYSTEM.
+    for _ in 0..4 {
+        app.window().dispatch_event(WindowEvent::KeyPressed {
+            text: slint::platform::Key::Tab.into(),
+        });
+        app.window().dispatch_event(WindowEvent::KeyReleased {
+            text: slint::platform::Key::Tab.into(),
+        });
+    }
+    let context = "You are my desktop assistant.\nUse short replies and accessible colors.";
+    for ch in context.chars() {
+        let text: slint::SharedString = if ch == '\n' {
+            slint::platform::Key::Return.into()
+        } else {
+            ch.to_string().into()
+        };
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text });
+    }
+    assert_eq!(
+        app.get_cfg_system_context().as_str(),
+        context,
+        "l'éditeur SYSTEM doit accepter le clavier et plusieurs lignes"
+    );
+    snapshot(
+        &app,
+        &window,
+        &out.join("settings-system-context.png"),
+        1080,
+        800,
+    )?;
     app.set_cfg_model("GLM-5.3".into());
     app.set_settings_error(app.get_tr().settings_invalid);
     snapshot(

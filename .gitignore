@@ -1,1 +1,18 @@
 /target
+
+# Local coding-assistant configuration, instructions and sessions
+.codex/
+.claude/
+.zcode/
+.claude.json
+AGENTS.md
+AGENTS.override.md
+CLAUDE.md
+CLAUDE.local.md
+CODEX.md
+CONTEXT.md
+
+# Local credentials
+.env
+.env.*
+!.env.example

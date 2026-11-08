@@ -1,93 +1,114 @@
-# Guide technique
+# Technical guide
 
-[← Présentation et installation](../README.md)
+[← Overview and installation](../README.md)
 
-## Composants du projet
+## Project components
 
-LYRA s’appuie sur un service local, nommé `hyprpanel`, pour communiquer avec
-Hyprland. Ce service expose 20 outils via MCP. Le chat y ajoute les propositions
-visuelles et le catalogue de palettes.
+LYRA uses a local service named `hyprpanel` to communicate with Hyprland.
+The service exposes 20 MCP tools. The chat adds visual choices and a palette catalog.
 
-| Dossier | Rôle | Licence |
+| Directory | Purpose | License |
 | --- | --- | --- |
-| `crates/hyprpanel-chat` | Application LYRA, interface Slint et conversation avec les modèles | GPL-3.0-only |
-| `crates/hyprpanel-core` | Communication avec Hyprland, inventaire de configuration et sauvegardes | MIT |
-| `crates/hyprpanel-server` | Service MCP local, binaire `hyprpanel` | MIT |
+| `crates/hyprpanel-chat` | LYRA app, Slint interface, and model conversations | GPL-3.0-only |
+| `crates/hyprpanel-core` | Hyprland communication, configuration inventory, and backups | MIT |
+| `crates/hyprpanel-server` | Local MCP service, built as `hyprpanel` | MIT |
 
-Le serveur écoute par défaut sur `127.0.0.1:8765/mcp`. Il authentifie les requêtes
-avec un jeton transmis par l’en-tête `Authorization: Bearer <JETON>` ou par
-le paramètre `?key=<JETON>`. LYRA configure automatiquement sa connexion au
-service à partir de la configuration locale.
+The service listens on `127.0.0.1:8765/mcp` by default. Requests authenticate
+with `Authorization: Bearer <TOKEN>` or the `?key=<TOKEN>` query parameter.
+LYRA reads the local service configuration to connect automatically.
 
-## Configuration et données
+## Configuration and data
 
-Chemins par défaut, adaptés si les variables XDG correspondantes sont définies :
+Default locations, adjusted when the corresponding XDG variables are set:
 
-| Emplacement | Contenu |
+| Location | Contents |
 | --- | --- |
-| `~/.config/hyprpanel/chat.toml` | Fournisseur, modèles, langue, animation et clé Z.ai |
-| `~/.config/hyprpanel/config.toml` | Port, jeton et chemins utilisés par le service |
-| `~/.local/state/hyprpanel/backups/` | Sauvegardes de configuration |
-| `~/.local/state/hyprpanel/lyra-history.json` | Registre des sauvegardes associées aux échanges |
-| `~/.cache/hyprpanel/screenshots/` | Captures d’écran |
+| `~/.config/hyprpanel/chat.toml` | Provider, models, SYSTEM context, language, animation, and GLM Coding Plan key |
+| `~/.config/hyprpanel/config.toml` | Service port, token, and paths |
+| `~/.local/state/hyprpanel/backups/` | Configuration backups |
+| `~/.local/state/hyprpanel/lyra-history.json` | Backup records associated with chat turns |
+| `~/.cache/hyprpanel/screenshots/` | Screenshots |
 
-Les fichiers de configuration sont créés avec les permissions `600`.
-Pour les initialiser sans passer par le script d’installation :
+Configuration files are created with `600` permissions. To initialize them
+without running the installer:
 
 ```bash
 hyprpanel init
 hyprpanel-chat init
 ```
 
-### Fournisseurs et modèles
+### SYSTEM context
 
-Le champ `provider` accepte `zcode`, `claude_code` ou `codex`.
+Open **Settings → SYSTEM context** to define the assistant’s role and instructions.
+The text is shared by all three providers and saved as `system_context` in
+`chat.toml`. Saving applies it to subsequent messages in the current conversation.
 
-- **Zcode** utilise LangChain Rust et le protocole Anthropic compatible Z.ai,
-  avec l’endpoint par défaut `https://api.z.ai/api/anthropic`. Les champs
-  `model`, `base_url`, `api_key` et `max_tokens` règlent ce mode.
-- **Claude Code** utilise le client officiel connecté à votre abonnement.
-  Le champ `claude_model` est facultatif.
-- **Codex** utilise le client officiel connecté avec ChatGPT.
-  Le champ `codex_model` est facultatif.
+An empty value uses LYRA’s default role in the selected interface language.
+A custom value replaces that role. LYRA still appends the visual-choice protocol
+and the MCP service instructions. The editor accepts up to 16,000 characters.
 
-Pour les deux clients officiels, un modèle vide conserve le choix par défaut
-du client. LYRA exclut les clés API et passerelles héritées de l’environnement
-pour ces modes, sans copier les jetons de connexion. Elle valide leurs réponses
-structurées avant de les afficher ou d’exécuter les outils demandés.
+The context is sent as actual system instructions: a system message for Zcode,
+`--system-prompt` for Claude Code, and `baseInstructions` for Codex app-server.
+It is kept separate from the user’s conversation text.
 
-Les outils, sauvegardes et choix cliquables sont exécutés par LYRA pour les trois
-fournisseurs. Leur utilisation dans le chat ne nécessite pas d’enregistrer
-manuellement le serveur MCP dans chaque client.
+### Subscriptions and models
 
-Références : [Claude Code programmatique](https://code.claude.com/docs/en/headless),
-[Codex non interactif](https://learn.chatgpt.com/docs/non-interactive-mode).
+`provider` accepts `zcode`, `claude_code`, or `codex`.
 
-## Fichiers joints et choix visuels
+| Provider | Subscription connection | Model field |
+| --- | --- | --- |
+| Zcode | GLM Coding Plan at `https://api.z.ai/api/anthropic` | `model` |
+| Claude Code | Official client signed in to a Claude subscription | `claude_model` |
+| Codex | Official app-server signed in with ChatGPT | `codex_model` |
 
-Le sélecteur de fichiers utilise `zenity` et accepte plusieurs pièces jointes :
+Zcode uses LangChain Rust to stream the official Coding Plan endpoint. This
+endpoint is also documented for Zcode’s subscription setup. LYRA rejects other
+Zcode endpoints rather than silently switching to a metered API.
+`api_key` contains the plan key; `max_tokens` limits responses in this mode.
 
-| Type | Limite par fichier |
+Claude Code and Codex use their official clients’ saved subscription sessions.
+LYRA excludes inherited API keys and endpoint overrides for these processes.
+Claude Code checks the authentication method; Codex also verifies the app-server
+account type is `chatgpt`. There is no automatic fallback to API billing.
+A blank CLI model field uses the client’s default model catalog selection.
+
+All three providers stream text before the response is complete. Claude Code
+uses partial `stream-json` events; Codex uses `item/agentMessage/delta` notifications
+from app-server. Their structured replies are decoded incrementally so only the
+visible answer appears in the chat. Tool calls are validated before execution.
+
+LYRA executes MCP tools, creates backup records, and manages clickable choices
+for every provider. Using these features in LYRA does not require manual MCP
+registration in each external client.
+
+Official references: [Zcode subscription setup](https://docs.z.ai/devpack/tool/zcode),
+[Claude Code programmatic mode](https://code.claude.com/docs/en/headless),
+[Codex app-server](https://learn.chatgpt.com/docs/app-server).
+
+## Attachments and visual choices
+
+The file picker uses `zenity` and supports multiple attachments:
+
+| Type | Limit per file |
 | --- | --- |
-| Images PNG, JPEG, WebP et GIF | 5 Mio |
-| Texte, configuration et code source | 64 Kio |
+| PNG, JPEG, WebP, and GIF images | 5 MiB |
+| Text, configuration, and source files | 64 KiB |
 
-Les images sont transmises au modèle comme des images ; le contenu des fichiers
-texte est inclus dans le message. Les PDF et le glisser-déposer ne sont pas pris
-en charge.
+Images are sent to the model as images; text file contents are included in the
+message. PDF attachments and drag-and-drop are not supported.
 
-`lyra_offer_choices` affiche de 2 à 8 options cliquables : texte, couleurs ou
-palettes, images locales ou schémas SVG autonomes. Le clic transmet le choix
-exact à l’agent et reprend la conversation. Une préférence ne vaut pas
-confirmation générale pour modifier le bureau.
+`lyra_offer_choices` displays 2–8 clickable options: text, colors or palettes,
+local images, or self-contained SVG diagrams. Clicking sends the exact choice
+back to the agent and resumes the conversation. A preference does not grant
+blanket permission to modify the desktop.
 
-`lyra_palette_catalog` propose une sélection locale de palettes issues de
-[Color Hunt](https://colorhunt.co/), avec leurs codes et liens sources. Ce
-catalogue constitue un point de départ et n’est pas actualisé en temps réel.
+`lyra_palette_catalog` provides a local selection of [Color Hunt](https://colorhunt.co/)
+palettes with exact color codes and source links. It is a starting point rather
+than a live catalog.
 
-## Dépannage
+## Troubleshooting
 
-### Le service local ne répond pas
+### The local service is unavailable
 
 ```bash
 systemctl --user status hyprpanel
@@ -95,86 +116,81 @@ journalctl --user -u hyprpanel -n 50 --no-pager
 systemctl --user restart hyprpanel
 ```
 
-Exécutez ces commandes depuis votre session Hyprland. Le script d’installation
-configure le service avec l’affichage Wayland détecté au moment de l’installation.
+Run these commands from your Hyprland session. The installer configures the
+service with the Wayland display detected at installation time.
 
-`hyprpanel check` fournit aussi un diagnostic IPC, configuration, sauvegardes,
-port et présence de `grim`. Son test de disponibilité du port peut signaler
-« occupé » lorsque le service est déjà démarré.
+`hyprpanel check` also diagnoses IPC, configuration, backups, port availability,
+and `grim`. Its port check may report “occupied” when the service is already running.
 
-### Vérifier les fournisseurs
+### Check subscriptions, streaming, and SYSTEM context
 
 ```bash
 hyprpanel-chat check-providers
 hyprpanel-chat check-providers --live
 ```
 
-La première commande vérifie la présence de la clé Zcode et la connexion locale
-des clients Claude Code et Codex. La seconde fait de vrais appels via les trois
-fournisseurs et vérifie les propositions de choix, sans modifier Hyprland.
+The first command checks the Coding Plan key and the official clients’ local
+login state. The live test makes real subscription requests, verifies that text
+fragments arrive before the final answer, checks a SYSTEM-context marker, and
+validates two clickable choices. It does not modify Hyprland.
 
-## Utiliser MCP depuis un autre client
+## Use MCP from another client
 
-Cette intégration est facultative et permet d’accéder aux outils du service
-directement depuis une autre application.
+This optional integration exposes the service’s tools directly to another app.
 
 ```bash
 hyprpanel token
 ```
 
-Utilisez le jeton affiché à la place de `<JETON>` dans les exemples ci-dessous.
-Adaptez le port si vous l’avez changé.
+Replace `<TOKEN>` below with the displayed value. Adjust the port if needed.
 
 ### Claude Code
 
 ```bash
 claude mcp add --scope user --transport http hyprpanel http://127.0.0.1:8765/mcp \
-  --header "Authorization: Bearer <JETON>"
+  --header "Authorization: Bearer <TOKEN>"
 ```
 
 ### Zcode
 
-Dans `~/.zcode/cli/config.json`, ajoutez le serveur à votre configuration existante :
+Add the server to your existing `~/.zcode/cli/config.json` configuration:
 
 ```json
 {
   "mcp": {
     "servers": {
       "hyprpanel": {
-        "url": "http://127.0.0.1:8765/mcp?key=<JETON>"
+        "url": "http://127.0.0.1:8765/mcp?key=<TOKEN>"
       }
     }
   }
 }
 ```
 
-### Outils exposés
+### Exposed tools
 
-| Domaine | Outils |
+| Area | Tools |
 | --- | --- |
-| État | `hypr_status`, `hypr_monitors`, `hypr_workspaces`, `hypr_clients`, `hypr_devices`, `hypr_binds` |
-| Réglages à chaud | `hypr_set_option_live`, `hypr_dispatch`, `hypr_notify` |
-| Configuration et sauvegardes | `hypr_config_files`, `hypr_find_setting`, `hypr_backup`, `hypr_list_backups`, `hypr_restore_backup` |
+| State | `hypr_status`, `hypr_monitors`, `hypr_workspaces`, `hypr_clients`, `hypr_devices`, `hypr_binds` |
+| Live settings | `hypr_set_option_live`, `hypr_dispatch`, `hypr_notify` |
+| Configuration and backups | `hypr_config_files`, `hypr_find_setting`, `hypr_backup`, `hypr_list_backups`, `hypr_restore_backup` |
 | Validation | `hypr_reload`, `hypr_config_errors` |
 | Observation | `hypr_get_option`, `hypr_eval`, `hypr_recent_events`, `hypr_screenshot` |
 
-Le serveur fournit l’état, les réglages à chaud, les sauvegardes et la validation.
-La persistance dans `hyprland.lua` se fait avec les outils d’édition de fichiers
-du client externe. Les fichiers `monitors.lua` et `inputs.lua`, générés par un
-outil externe, sont signalés en lecture seule.
+The service provides state, live settings, backups, and validation. Persisting
+changes in `hyprland.lua` uses an external client’s file-editing tools.
+Generated `monitors.lua` and `inputs.lua` files are marked read-only.
 
-## Compatibilité Hyprland
+## Hyprland compatibility
 
-Le projet a été testé sur Hyprland 0.57.1 avec la configuration Lua (`hl.*`).
+Tested on Hyprland 0.57.1 with Lua configuration (`hl.*`).
 
-- Les réglages à chaud passent par `/dispatch hl.dsp.global("conf …")`.
-  Une option inconnue peut être ignorée malgré une réponse « ok » : son effet
-  doit être vérifié.
-- `getoption` et `hl.get_config` renvoient l’état des fichiers, qui peut différer
-  d’un réglage appliqué à chaud.
-- `/repl` permet de lire les expressions Lua du compositeur.
+- Live settings use `/dispatch hl.dsp.global("conf …")`. Unknown options can be
+  ignored despite an “ok” response, so their effect must be verified.
+- `getoption` and `hl.get_config` return file state, which may differ from a live override.
+- `/repl` reads Lua expressions from the compositor.
 
-## Développer et vérifier l’interface
+## Development
 
 ```bash
 cargo build --workspace --locked
@@ -183,19 +199,21 @@ cargo run -p hyprpanel-chat --example preview --locked
 cargo run -p hyprpanel-chat --example typing_perf --locked
 ```
 
-Les deux exemples fonctionnent sans session graphique, serveur MCP ou appel de
-modèle. `preview` rend les composants Slint réels, vérifie les interactions et
-écrit les captures dans `target/lyra-previews/`. `typing_perf` mesure le traitement
-des frappes et le rendu, et vérifie la pause de l’animation pendant la saisie.
-Ajoutez `--offline` après téléchargement des dépendances pour travailler sans
-réseau.
+The two examples work without a graphical session, MCP service, or model calls.
+`preview` renders the actual Slint components, checks interactions, and writes
+screenshots to `target/lyra-previews/`. `typing_perf` measures keyboard processing
+and rendering, and verifies that avatar animation pauses while typing.
+Add `--offline` after fetching dependencies to work without network access.
 
-Les réponses Markdown sont converties en HTML nettoyé puis affichées par les
-composants natifs. Les détails d’outils sont repliés et le défilement suit la
-réponse tant que l’utilisateur reste en bas du chat.
+Markdown responses are converted to sanitized HTML and rendered with native
+components. Tool details remain collapsed until expanded, and the chat follows
+the response while the user stays at the bottom.
 
-L’avatar utilise des textures préparées en 256 × 256 au build et une horloge
-partagée limitée à 20 images par seconde. Les animations s’arrêtent pendant la
-saisie, les panneaux modaux et la minimisation. Elles sont désactivables dans
-les réglages (`animate_avatar`). Les prompts de création des images figurent
-dans [la documentation des assets](../crates/hyprpanel-chat/assets/README.md).
+Avatar textures are prepared at 256 × 256 during the build. A shared clock limits
+animation to 20 frames per second. Motion pauses during typing, modal panels,
+and minimization, and can be disabled in settings (`animate_avatar`). Image
+creation prompts are kept in the [asset documentation](../crates/hyprpanel-chat/assets/README.md).
+
+Local coding-assistant directories, instruction files, contexts, and credentials
+are excluded by `.gitignore`. Keep subscription credentials in their normal
+client configuration locations outside this repository.

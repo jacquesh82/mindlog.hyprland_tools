@@ -83,6 +83,9 @@ pub struct Tr {
     pub settings_saved: String,
     pub settings_invalid: String,
     pub settings_motion: String,
+    pub settings_context: String,
+    pub settings_context_hint: String,
+    pub settings_context_invalid: String,
     pub provider: String,
     pub subscription_hint: String,
     // historique
@@ -165,16 +168,16 @@ fn about_body(version: &str) -> (String, String) {
     let fr = format!(
         "LYRA — Wayland Configuration Assistant\n\
          Version {version} · Licence GPL-3.0 (Slint sous licence communauté)\n\
-         Fenêtre native Slint 1.18 · Agent LangChain Rust 8 (module claude)\n\
+         Fenêtre native Slint 1.18 · GLM Coding Plan, Claude Code et Codex\n\
          Outils du panneau hyprpanel via MCP (rmcp 3.9)\n\
-         Dépôt : mindlog.today/mindlog.hyprland_tools"
+         Dépôt : github.com/jacquesh82/mindlog.hyprland_tools"
     );
     let en = format!(
         "LYRA — Wayland Configuration Assistant\n\
          Version {version} · GPL-3.0 license (Slint community license)\n\
-         Native Slint 1.18 window · LangChain Rust 8 agent (claude module)\n\
+         Native Slint 1.18 window · GLM Coding Plan, Claude Code and Codex\n\
          hyprpanel panel tools over MCP (rmcp 3.9)\n\
-         Repository: mindlog.today/mindlog.hyprland_tools"
+         Repository: github.com/jacquesh82/mindlog.hyprland_tools"
     );
     (fr, en)
 }
@@ -217,15 +220,18 @@ fn french() -> Tr {
         settings_title: "Réglages".into(),
         settings_language: "Langue / Language".into(),
         settings_model: "Modèle".into(),
-        settings_endpoint: "Endpoint (protocole Anthropic)".into(),
+        settings_endpoint: "Service du GLM Coding Plan".into(),
         settings_max_tokens: "Tokens max".into(),
-        settings_api_key: "Clé API".into(),
+        settings_api_key: "Clé du GLM Coding Plan".into(),
         settings_clients: "Clients externes (Claude Code, ZCode)".into(),
         settings_clients_ok: "✔ enregistré".into(),
         settings_clients_missing: "✗ non enregistré — commande :".into(),
         settings_saved: "réglages enregistrés".into(),
-        settings_invalid: "Vérifiez le modèle, l’adresse API et la limite de tokens (256 à 200 000).".into(),
+        settings_invalid: "Vérifiez le modèle et la limite de tokens (256 à 200 000).".into(),
         settings_motion: "Animer l’avatar de LYRA".into(),
+        settings_context: "Contexte SYSTEM".into(),
+        settings_context_hint: "Instructions communes aux trois fournisseurs. Laissez vide pour le rôle LYRA par défaut ; votre texte le remplace. Les consignes des outils restent ajoutées. 16 000 caractères maximum.".into(),
+        settings_context_invalid: "Le contexte SYSTEM doit contenir au maximum 16 000 caractères.".into(),
         provider: "Abonnement utilisé".into(),
         subscription_hint: "Utilise la session connectée du client officiel. Modèle vide = modèle par défaut de l’abonnement. Connexion : claude auth login / codex login.".into(),
         history_title: "Historique de configuration".into(),
@@ -291,15 +297,18 @@ fn english() -> Tr {
         settings_title: "Settings".into(),
         settings_language: "Langue / Language".into(),
         settings_model: "Model".into(),
-        settings_endpoint: "Endpoint (Anthropic protocol)".into(),
+        settings_endpoint: "GLM Coding Plan service".into(),
         settings_max_tokens: "Max tokens".into(),
-        settings_api_key: "API key".into(),
+        settings_api_key: "GLM Coding Plan key".into(),
         settings_clients: "External clients (Claude Code, ZCode)".into(),
         settings_clients_ok: "✔ registered".into(),
         settings_clients_missing: "✗ not registered — command:".into(),
         settings_saved: "settings saved".into(),
-        settings_invalid: "Check the model, API address and token limit (256 to 200,000).".into(),
+        settings_invalid: "Check the model and token limit (256 to 200,000).".into(),
         settings_motion: "Animate LYRA’s avatar".into(),
+        settings_context: "SYSTEM context".into(),
+        settings_context_hint: "Instructions shared by all three providers. Leave empty for LYRA’s default role; your text replaces it. Tool instructions are still appended. Maximum 16,000 characters.".into(),
+        settings_context_invalid: "The SYSTEM context must not exceed 16,000 characters.".into(),
         provider: "Active subscription".into(),
         subscription_hint: "Uses the signed-in session of the official client. Empty model = subscription default. Sign in: claude auth login / codex login.".into(),
         history_title: "Configuration history".into(),
@@ -375,6 +384,9 @@ impl Tr {
             settings_saved: self.settings_saved.clone().into(),
             settings_invalid: self.settings_invalid.clone().into(),
             settings_motion: self.settings_motion.clone().into(),
+            settings_context: self.settings_context.clone().into(),
+            settings_context_hint: self.settings_context_hint.clone().into(),
+            settings_context_invalid: self.settings_context_invalid.clone().into(),
             provider: self.provider.clone().into(),
             subscription_hint: self.subscription_hint.clone().into(),
             history_title: self.history_title.clone().into(),

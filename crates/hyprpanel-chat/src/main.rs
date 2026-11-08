@@ -213,10 +213,11 @@ fn main() -> anyhow::Result<()> {
                 let Some(app) = weak.upgrade() else { return };
                 app.set_cfg_lang_index(if cfg.lang() == i18n::Lang::En { 1 } else { 0 });
                 app.set_cfg_model(cfg.active_model().into());
-                app.set_cfg_base_url(cfg.base_url.clone().into());
+                app.set_cfg_base_url(chat_config::ZCODE_SUBSCRIPTION_URL.into());
                 app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
                 app.set_cfg_api_key(cfg.api_key.clone().into());
                 app.set_cfg_animate_avatar(cfg.animate_avatar);
+                app.set_cfg_system_context(cfg.system_context.clone().into());
                 app.set_settings_error("".into());
                 app.set_overlay("settings".into());
             });
@@ -234,8 +235,14 @@ fn main() -> anyhow::Result<()> {
                 "fr".into()
             };
             cfg.animate_avatar = app.get_cfg_animate_avatar();
+            cfg.system_context = app.get_cfg_system_context().trim().to_string();
+            if cfg.system_context.chars().count() > chat_config::MAX_SYSTEM_CONTEXT_CHARS {
+                app.set_settings_error(app.get_tr().settings_context_invalid.clone());
+                return;
+            }
             cfg.set_active_model(app.get_cfg_model().trim().to_string());
-            cfg.base_url = app.get_cfg_base_url().trim().to_string();
+            // Zcode est un accès Coding Plan : l'endpoint n'est pas un choix API.
+            cfg.base_url = chat_config::ZCODE_SUBSCRIPTION_URL.into();
             if cfg.provider == chat_config::Provider::Zcode
                 && (cfg.model.is_empty() || cfg.base_url.is_empty())
             {

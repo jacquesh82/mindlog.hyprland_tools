@@ -5,6 +5,10 @@
 
 use std::path::PathBuf;
 
+/// Endpoint officiel du GLM Coding Plan (pas de repli vers une API à l'usage).
+pub const ZCODE_SUBSCRIPTION_URL: &str = "https://api.z.ai/api/anthropic";
+pub const MAX_SYSTEM_CONTEXT_CHARS: usize = 16_000;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
@@ -48,6 +52,9 @@ pub struct ChatConfig {
     pub claude_model: String,
     #[serde(default)]
     pub codex_model: String,
+    /// Vide = rôle LYRA par défaut ; sinon remplace ce rôle pour les trois modes.
+    #[serde(default)]
+    pub system_context: String,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -62,6 +69,15 @@ pub struct ChatConfig {
 }
 
 impl ChatConfig {
+    pub fn validate_subscription(&self) -> Result<(), String> {
+        if self.provider == Provider::Zcode
+            && self.base_url.trim_end_matches('/') != ZCODE_SUBSCRIPTION_URL
+        {
+            return Err("Zcode requires the GLM Coding Plan endpoint https://api.z.ai/api/anthropic; pay-as-you-go API fallback is disabled.".into());
+        }
+        Ok(())
+    }
+
     pub fn active_model(&self) -> &str {
         match self.provider {
             Provider::Zcode => &self.model,
@@ -124,7 +140,8 @@ impl ChatConfig {
             provider: Provider::Zcode,
             claude_model: String::new(),
             codex_model: String::new(),
-            base_url: "https://api.z.ai/api/anthropic".into(),
+            system_context: String::new(),
+            base_url: ZCODE_SUBSCRIPTION_URL.into(),
             api_key: String::new(),
             model: "GLM-5.3".into(),
             max_tokens: 8192,
@@ -223,6 +240,45 @@ fn restrict_permissions(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_context_roundtrips_and_old_configs_keep_default_role() {
+        let mut cfg = ChatConfig::defaults();
+        let old = cfg
+            .as_toml()
+            .lines()
+            .filter(|line| !line.starts_with("system_context"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            toml::from_str::<ChatConfig>(&old)
+                .unwrap()
+                .system_context
+                .is_empty()
+        );
+        cfg.system_context = "You are my desktop assistant.\nPréférences : #7BDACD, compact layouts.\nKeep `commands` intact.".into();
+        assert_eq!(
+            toml::from_str::<ChatConfig>(&cfg.as_toml())
+                .unwrap()
+                .system_context,
+            cfg.system_context
+        );
+    }
+
+    #[test]
+    fn zcode_never_falls_back_to_a_metered_api_endpoint() {
+        let mut cfg = ChatConfig::defaults();
+        assert!(cfg.validate_subscription().is_ok());
+        cfg.base_url = "https://api.z.ai/api/paas/v4".into();
+        assert!(cfg.validate_subscription().is_err());
+        cfg.base_url = "https://api.anthropic.com".into();
+        assert!(cfg.validate_subscription().is_err());
+        cfg.provider = Provider::Codex;
+        assert!(
+            cfg.validate_subscription().is_ok(),
+            "Codex uses its own ChatGPT session, not this endpoint"
+        );
+    }
 
     #[test]
     fn extraction_cle_zcode() {
