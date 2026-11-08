@@ -5,7 +5,8 @@
 ## Project components
 
 LYRA uses a local service named `hyprpanel` to communicate with Hyprland.
-The service exposes 20 MCP tools. The chat adds visual choices and a palette catalog.
+The service exposes 20 MCP tools. The chat adds visual choices, palettes,
+contrast checks, web tools, and explicitly authorized file/command tools.
 
 | Directory | Purpose | License |
 | --- | --- | --- |
@@ -47,7 +48,7 @@ native dialog asks whether to allow reading and editing configurations under
 lets the user grant or revoke access later; provider switching does not grant it.
 
 Before approval, LYRA exposes text/color/SVG choices, the static palette catalog,
-and public web tools. It blocks assistant file/desktop tool calls, automatic Hyprland backups,
+the contrast calculator, and public web tools. It blocks assistant file/desktop tool calls, automatic Hyprland backups,
 restoration, and model-proposed local image previews. Files explicitly selected
 and sent by the user are separately authorized attachments.
 
@@ -169,13 +170,22 @@ It is kept separate from the user’s conversation text.
 A shared SYSTEM prompt limits LYRA to Hyprland, Wayland, and their associated
 tools: configuration and troubleshooting, monitors, input, appearance, bars,
 launchers, locking, screenshots, screen sharing, portals, and clipboard utilities.
-Related scripts and services, and questions about LYRA itself, are also in scope.
+Related scripts and services, desktop applications, browsers, browser themes
+(including unpacked Brave/Chromium themes), and questions about LYRA are in scope.
 
 A fully unrelated request receives a short redirect with no answer to that topic
 or model-requested tool calls. Mixed requests are answered only for their
 relevant part. The prompt distinguishes a chocolate desktop palette from a
 cake recipe and asks LYRA to stop an off-topic thread even if an earlier answer
-had drifted. Custom roles remain subject to this scope.
+had drifted. Custom roles remain subject to the selected scope.
+
+**Settings → Limit actions to the Wayland desktop** is enabled by default,
+including for older configurations without the new `limit_wayland_scope` key.
+Disable it to answer general requests. The setting is saved in `chat.toml` and
+updates SYSTEM for all providers immediately on save; no new conversation is
+needed. General mode overrides earlier scope-only refusals and a custom role's
+Wayland specialization. It keeps verification, color accessibility rules,
+filesystem permissions, and per-command confirmation.
 
 ### Subscriptions and models
 
@@ -223,6 +233,20 @@ The file picker uses `zenity` and supports multiple attachments:
 Images are sent to the model as images; text file contents are included in the
 message. PDF attachments and drag-and-drop are not supported.
 
+The composer also accepts **Ctrl+V**, **Shift+Insert**, or its **Paste image**
+button. A one-shot Wayland clipboard read runs on a worker thread through
+`wl-clipboard-rs`, with PNG/JPEG/WebP/GIF support, a 5 MiB payload cap, bounded pipe
+read time, and a 32 megapixel dimension cap. No clipboard watcher or polling loop
+runs while idle. Text paste falls back to Slint's native selection/undo behavior.
+
+Pasted images are explicit attachments, so they do not require general filesystem
+approval. They are staged in `0600` files under a private temporary directory,
+displayed in the draft, and shared only on Send. The draft owns each temporary
+image until removal/reset or transfer to the in-flight turn. The file stays alive
+while the model input is prepared and is removed at the end of that turn. Normal
+window closure also removes the temporary directory. Sending waits for clipboard
+loading to finish without blocking typing or clearing the draft.
+
 `lyra_offer_choices` displays 2–8 clickable options: text, colors or palettes,
 local images, or self-contained SVG diagrams. Clicking sends the exact choice
 back to the agent and resumes the conversation. A preference does not grant
@@ -231,6 +255,28 @@ blanket permission to modify the desktop.
 `lyra_palette_catalog` provides a local selection of [Color Hunt](https://colorhunt.co/)
 palettes with exact color codes and source links. It is a starting point rather
 than a live catalog.
+
+### Color contrast rules
+
+The [color accessibility policy](COLOR_ACCESSIBILITY.md) is appended to SYSTEM
+after custom roles for all three subscriptions. The original French rule lives
+in `crates/hyprpanel-chat/prompts/color-accessibility.fr.md`. General mode keeps it.
+
+`lyra_check_contrast` checks up to 32 named BG/FG roles/states per call. It linearizes
+sRGB with the 0.04045 breakpoint and WCAG relative-luminance weights, then computes
+`(Lmax + 0.05) / (Lmin + 0.05)` without rounding for pass/fail. It distinguishes
+normal text, known large/bold text, and essential graphics. Alpha is composited
+against a known opaque canvas; unknown backdrops are rejected rather than assumed.
+
+Failing pairs get proposed opaque 8-bit repairs: adjust FG first while keeping BG;
+for a 7:1 target that cannot be met on the original BG, adjust BG as well. Image and
+gradient backgrounds require worst-case samples or a verified opaque surface.
+Repairs must be rechecked before use. This calculator is not a full WCAG audit.
+
+Tests cover formula reference values, exact AA boundaries, transparency, large
+text thresholds, generated repairs, and the native semantic theme tokens across
+default/hover/pressed/focus/disabled roles. Primary-button pressed colors and
+focus indicators use validated semantic tokens.
 
 ## Troubleshooting
 
@@ -262,10 +308,13 @@ The first command checks the Coding Plan key and the official clients’ local
 login state. The live test makes real subscription requests, verifies that text
 fragments arrive before the final answer, checks a SYSTEM-context marker, and
 validates two clickable choices. `--scope` makes real model requests to check
-that a recipe request is redirected while a Wayland question is answered.
+that restricted mode redirects a recipe while accepting Wayland and Brave-theme
+requests, and that general mode answers after an earlier scope refusal.
 `--policy` makes real subscription requests to verify that uncertainty produces
-a web-tool request and that an exact command is proposed through LYRA’s tool.
-It never executes the requested tools. `check-web` reads the official wiki
+a web-tool request, that an exact command is proposed through LYRA’s tool,
+and that inaccessible Waybar text receives a computed contrast correction.
+It never executes proposed web/command actions; contrast calculation is pure.
+`check-web` reads the official wiki
 directly to diagnose HTTPS, DNS, and text extraction.
 These diagnostics do not modify Hyprland.
 

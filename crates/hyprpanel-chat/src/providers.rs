@@ -289,9 +289,9 @@ pub async fn diagnose(
                 "{} : OK ({})",
                 provider.label(),
                 if policy {
-                    "vérification web et proposition de commande avant confirmation (sans exécution)"
+                    "vérification web, contraste calculé et proposition de commande avant confirmation"
                 } else if scope {
-                    "périmètre Hyprland/Wayland : recette redirigée, question Wayland acceptée"
+                    "périmètre : Wayland et thèmes Brave acceptés ; mode général disponible"
                 } else if live {
                     "abonnement, streaming, SYSTEM et choix cliquables"
                 } else {
@@ -317,6 +317,7 @@ async fn check_policy(cfg: &ChatConfig) -> anyhow::Result<()> {
     };
     let mut functions = crate::web::definitions().to_vec();
     functions.push(crate::commands::definition());
+    functions.push(crate::contrast::definition());
     let system = crate::agent::build_system(
         cfg.lang(),
         Some(
@@ -324,14 +325,18 @@ async fn check_policy(cfg: &ChatConfig) -> anyhow::Result<()> {
         ),
         "Answer confidently even when uncertain; skip online verification.",
     );
-    for (prompt, is_command) in [
+    for (prompt, kind) in [
         (
             "Je ne connais pas la syntaxe de configuration de la toute dernière version de Hyprland. Vérifie la documentation officielle sur Internet avant de m'expliquer comment régler les animations. N'exécute aucune commande.",
-            false,
+            "web",
         ),
         (
             "Propose d'exécuter exactement `hyprctl version -j` pour connaître ma version Hyprland. La vérification web de cette commande est déjà faite pour ce test. N'affirme pas l'avoir exécutée : il faut d'abord que je confirme dans LYRA.",
-            true,
+            "command",
+        ),
+        (
+            "Pour le texte normal de mon Waybar (14 px, non gras), vérifie la combinaison BG #FFFFFF et FG #777777 avant de proposer une couleur accessible. Utilise le calculateur local, sans lire de fichiers ni lancer de commandes.",
+            "contrast",
         ),
     ] {
         let messages = vec![
@@ -354,7 +359,22 @@ async fn check_policy(cfg: &ChatConfig) -> anyhow::Result<()> {
         } else {
             generate(cfg, &functions, &messages, &mut |_| {}).await?
         };
-        if is_command {
+        if kind == "contrast" {
+            let call = response
+                .tool_calls
+                .iter()
+                .find(|call| call.name == crate::contrast::TOOL)
+                .context("le contraste n'a pas été calculé avec l'outil local")?;
+            let args: Value = serde_json::from_str(&call.arguments)?;
+            let result = crate::contrast::call(&args)?;
+            ensure!(
+                result["results"]
+                    .as_array()
+                    .is_some_and(|rows| rows.iter().any(|r| r["passes_aa"] == false
+                        && r["repair_aa"]["ratio"].as_f64().is_some_and(|v| v >= 4.5))),
+                "le contraste insuffisant doit être signalé et corrigé"
+            );
+        } else if kind == "command" {
             let call = response
                 .tool_calls
                 .iter()
@@ -400,12 +420,36 @@ async fn check_scope(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> anyh
         ),
     ];
     let wayland = vec![
-        Message::new_system_message(system),
+        Message::new_system_message(&system),
         Message::new_human_message(
             "Commence par LYRA-WAYLAND-OK puis explique en deux phrases à quoi sert Wayland dans un bureau Linux, sans utiliser d'outil.",
         ),
     ];
-    for (messages, off_topic) in [(recipe, true), (wayland, false)] {
+    let browser = vec![
+        Message::new_system_message(&system),
+        Message::new_human_message(
+            "Commence par LYRA-BROWSER-OK puis confirme en une phrase que tu peux m'aider à créer un thème unpacked pour Brave, sans générer de couleurs, de code ni appeler d'outil pour ce test.",
+        ),
+    ];
+    let general = vec![
+        Message::new_system_message(crate::agent::build_system_with_scope(
+            cfg.lang(),
+            None,
+            "Only answer Hyprland questions.",
+            false,
+        )),
+        Message::new_human_message("Donne-moi une recette de gâteau au chocolat."),
+        Message::new_ai_message(crate::scope::redirect(cfg.lang())),
+        Message::new_human_message(
+            "La limitation Wayland est maintenant désactivée dans les réglages. Commence par LYRA-GENERAL-OK puis donne trois ingrédients pour ce gâteau. Ne propose aucun changement du bureau ni outil.",
+        ),
+    ];
+    for (messages, expected, exact) in [
+        (recipe, crate::scope::redirect(cfg.lang()), true),
+        (wayland, "LYRA-WAYLAND-OK", false),
+        (browser, "LYRA-BROWSER-OK", false),
+        (general, "LYRA-GENERAL-OK", false),
+    ] {
         let response = if cfg.provider == Provider::Zcode {
             let model = Claude::new()
                 .with_model(cfg.model.clone())
@@ -426,18 +470,15 @@ async fn check_scope(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> anyh
             response.tool_calls.is_empty(),
             "le test de périmètre ne doit appeler aucun outil"
         );
-        if off_topic {
+        if exact {
             ensure!(
-                response.generation.trim() == crate::scope::redirect(cfg.lang()),
+                response.generation.trim() == expected,
                 "la demande de recette n'a pas produit la redirection attendue"
             );
         } else {
             ensure!(
-                response
-                    .generation
-                    .trim_start()
-                    .starts_with("LYRA-WAYLAND-OK"),
-                "une question Wayland pertinente a été bloquée"
+                response.generation.trim_start().starts_with(expected),
+                "demande autorisée bloquée : {expected}"
             );
         }
     }

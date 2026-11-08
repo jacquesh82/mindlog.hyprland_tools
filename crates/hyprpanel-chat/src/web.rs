@@ -15,7 +15,7 @@ pub fn definitions() -> [FunctionDefinition; 2] {
     [
         FunctionDefinition::new(
             SEARCH,
-            "Recherche des informations actuelles sur Hyprland, Wayland et leur outillage. Préférez les sources officielles, puis lisez les pages avec lyra_web_fetch. Une erreur n'est jamais une preuve.",
+            "Recherche des informations actuelles sur le Web dans le périmètre actuellement autorisé. Préférez les sources officielles, puis lisez les pages avec lyra_web_fetch. Une erreur n'est jamais une preuve.",
             json!({"type":"object","required":["query"],"properties":{"query":{"type":"string","description":"Question technique, sans identifiant ni contenu privé local. Utiliser site: pour cibler les docs officielles."}}}),
         ),
         FunctionDefinition::new(

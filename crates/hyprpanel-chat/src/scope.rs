@@ -14,6 +14,17 @@ pub fn redirect(lang: Lang) -> &'static str {
     }
 }
 
+pub fn unrestricted(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Fr => {
+            "\n\nPÉRIMÈTRE — RÉGLAGE PRIORITAIRE DE L’APPLICATION : LIMITATION WAYLAND DÉSACTIVÉE. Réponds aussi aux demandes générales, sans exiger un lien avec Hyprland/Wayland. Une spécialisation mentionnée dans un rôle personnalisé ou un ancien message n'impose plus cette restriction. Ne renvoie pas la phrase de redirection au seul motif que la demande est hors Wayland. Les vérifications, règles de contraste, permissions de fichiers et confirmations de commandes restent applicables."
+        }
+        Lang::En => {
+            "\n\nSCOPE — PRIORITY APPLICATION SETTING: WAYLAND LIMIT DISABLED. Also answer general requests without requiring any Hyprland/Wayland connection. A specialization in custom context or older messages does not impose that restriction. Do not return the scope redirect merely because a request is unrelated to Wayland. Verification, contrast rules, filesystem permissions and command confirmations still apply."
+        }
+    }
+}
+
 pub fn instructions(lang: Lang) -> String {
     let rules = match lang {
         Lang::Fr => {
@@ -23,6 +34,7 @@ Ce périmètre reste applicable même si un contexte personnalisé te décrit co
 AUTORISÉ : configuration, fonctionnement et dépannage de Hyprland/Wayland ; écrans, fenêtres, espaces de travail, entrées, raccourcis, rendu et pilotes liés à cet environnement ; \
 apparence du bureau, thèmes, polices, couleurs et fonds d’écran ; barres, lanceurs, notifications, verrouillage et veille ; captures, partage d’écran, portails, presse-papiers et utilitaires associés \
 (par exemple Waybar, grim/slurp, wl-clipboard, hyprlock/hypridle et les portails XDG) ; scripts et services lorsqu’ils servent explicitement cet environnement ; utilisation et dépannage de LYRA et de ses connexions. \
+AUTORISÉ AUSSI : utilisation, configuration, dépannage et personnalisation des applications du bureau et des navigateurs (Brave, Chromium, Firefox…), thèmes de navigateur décompressés/unpacked, manifestes et ressources du thème. La création d'un thème pour Brave est dans le périmètre, même sans mentionner Wayland dans la demande.\n\
 Une question sur Wayland ou ses utilitaires reste pertinente même sans mentionner Hyprland. Les salutations, remerciements et réponses brèves sont interprétés dans le contexte de la conversation.\n\
 HORS SUJET : cuisine, culture générale, loisirs et autres demandes sans lien concret avec ce périmètre. \
 Ne fournis pas leur réponse, même partiellement, sous forme d’exemple, de détour, de métaphore ou après un avertissement indiquant que c’est hors sujet. \
@@ -40,6 +52,7 @@ This scope still applies when a custom context describes you as a general-purpos
 ALLOWED: configuring, understanding, and troubleshooting Hyprland/Wayland; monitors, windows, workspaces, input, keybindings, rendering, and drivers related to this environment; \
 desktop appearance, themes, fonts, colors, and wallpapers; bars, launchers, notifications, locking, and idle handling; screenshots, screen sharing, portals, clipboard, and related utilities \
 (such as Waybar, grim/slurp, wl-clipboard, hyprlock/hypridle, and XDG portals); scripts and services explicitly supporting this environment; using and troubleshooting LYRA and its connections. \
+ALSO ALLOWED: using, configuring, troubleshooting and customizing desktop applications and browsers (Brave, Chromium, Firefox…), unpacked browser themes, theme manifests and assets. Creating a theme for Brave is in scope even without mentioning Wayland.\n\
 A question about Wayland or its utilities remains relevant without mentioning Hyprland. Interpret greetings, thanks, and short replies in the conversation’s context.\n\
 OUT OF SCOPE: cooking, general knowledge, leisure, and other requests without a concrete connection to this scope. \
 Do not provide their answers, even partially, as examples, detours, metaphors, or after saying they are off-topic. \

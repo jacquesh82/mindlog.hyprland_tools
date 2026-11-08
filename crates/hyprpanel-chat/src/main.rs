@@ -6,7 +6,9 @@ mod agent;
 mod avatar;
 mod chat_config;
 mod choices;
+mod clipboard;
 mod commands;
+mod contrast;
 mod environment;
 mod filesystem;
 mod i18n;
@@ -99,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     app.set_provider_index(cfg.provider.index());
     app.set_model_label(cfg.model_label().into());
     app.set_animations_enabled(cfg.animate_avatar);
+    app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_tr(i18n::tr(cfg.lang()).to_slint());
     app.set_fs_root(filesystem.root().to_string_lossy().to_string().into());
@@ -129,6 +132,11 @@ fn main() -> anyhow::Result<()> {
     // Miroir Rust des pièces jointes (le modèle Slint n'est que l'affichage).
     let pending_files: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Garde principale : nettoie aussi les fichiers en cours d'envoi à la fermeture.
+    let clipboard_directory = tempfile::Builder::new()
+        .prefix("lyra-clipboard-")
+        .tempdir()?;
+    let clipboard = std::sync::Arc::new(clipboard::Store::new(clipboard_directory.path().into()));
 
     // UI → agent : canal non borné ; l'agent tourne dans un runtime tokio
     // hébergé par un thread dédié, la boucle d'événements Slint garde le main.
@@ -214,13 +222,14 @@ fn main() -> anyhow::Result<()> {
             }
         });
 
+        let images_for_send = clipboard.clone();
         let files_for_send = pending_files.clone();
         let weak_send = app.as_weak();
         app.on_send(move |text| {
             let Some(app) = weak_send.upgrade() else {
                 return;
             };
-            if app.get_busy() {
+            if app.get_busy() || app.get_paste_in_progress() {
                 return;
             }
             let files: Vec<_> =
@@ -234,6 +243,7 @@ fn main() -> anyhow::Result<()> {
             ui::attachments_clear(&weak_send);
             if let Err(error) = tx_send.send(agent::UserEvent::Input {
                 text: text.trim().to_string(),
+                pasted_images: images_for_send.take(&files),
                 files,
             }) {
                 app.set_busy(false);
@@ -246,12 +256,15 @@ fn main() -> anyhow::Result<()> {
         });
 
         let weak_reset = app.as_weak();
+        let images_for_reset = clipboard.clone();
         let files_for_reset = pending_files.clone();
         app.on_new_conversation(move || {
+            images_for_reset.reset();
             files_for_reset.lock().expect("pièces empoisonnées").clear();
             ui::attachments_clear(&weak_reset);
             if let Some(app) = weak_reset.upgrade() {
                 app.set_draft("".into());
+                app.set_paste_in_progress(false);
                 app.invoke_focus_composer();
             }
             let _ = tx_reset.send(agent::UserEvent::Reset);
@@ -306,6 +319,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
                 app.set_cfg_api_key(cfg.api_key.clone().into());
                 app.set_cfg_animate_avatar(cfg.animate_avatar);
+                app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
                 app.set_cfg_system_context(cfg.system_context.clone().into());
                 app.set_settings_error("".into());
                 app.set_overlay("settings".into());
@@ -324,6 +338,7 @@ fn main() -> anyhow::Result<()> {
                 "fr".into()
             };
             cfg.animate_avatar = app.get_cfg_animate_avatar();
+            cfg.limit_wayland_scope = app.get_cfg_limit_wayland_scope();
             cfg.system_context = app.get_cfg_system_context().trim().to_string();
             if cfg.system_context.chars().count() > chat_config::MAX_SYSTEM_CONTEXT_CHARS {
                 app.set_settings_error(app.get_tr().settings_context_invalid.clone());
@@ -382,6 +397,79 @@ fn main() -> anyhow::Result<()> {
             }
         });
 
+        // Collage : lecture Wayland hors du thread UI, puis transfert des
+        // fichiers temporaires au brouillon et à l'agent jusqu'à la fin du tour.
+        let images = clipboard.clone();
+        let files = pending_files.clone();
+        let weak = app.as_weak();
+        app.on_paste_clipboard(move |image_only| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            if app.get_busy() || app.get_overlay() != "none" || app.get_paste_in_progress() {
+                return;
+            }
+            let Some(generation) = images.begin() else {
+                return;
+            };
+            app.set_paste_in_progress(true);
+            app.set_status(app.get_tr().paste_reading);
+            let images = images.clone();
+            let files = files.clone();
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let result = clipboard::read_image(images.directory());
+                images
+                    .reading
+                    .store(false, std::sync::atomic::Ordering::Release);
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(app) = weak.upgrade() else {
+                        return;
+                    };
+                    if !images.current(generation) {
+                        return;
+                    }
+                    app.set_paste_in_progress(false);
+                    let translations = app.get_tr();
+                    match result {
+                        Ok(Some(file)) => {
+                            let path = images.insert(file);
+                            files
+                                .lock()
+                                .expect("pièces empoisonnées")
+                                .push(path.clone());
+                            ui::attachment_push(
+                                &weak,
+                                translations.paste_label.as_str(),
+                                &agent::attachment_meta(&path),
+                            );
+                            app.set_status(translations.paste_added);
+                        }
+                        Ok(None) => {
+                            if image_only {
+                                app.set_status(translations.paste_empty);
+                            } else {
+                                app.invoke_paste_text();
+                                app.set_status("".into());
+                            }
+                        }
+                        Err(error) => {
+                            // Le collage natif de texte reste disponible si le
+                            // protocole de données Wayland n'est pas accessible.
+                            if image_only {
+                                app.set_status(
+                                    format!("{} : {error}", translations.paste_error).into(),
+                                );
+                            } else {
+                                app.invoke_paste_text();
+                                app.set_status(translations.paste_error);
+                            }
+                        }
+                    }
+                });
+            });
+        });
+
         // ── Sélecteur de fichiers (zenity) ──────────────────────────────
         let files_for_pick = pending_files.clone();
         let weak_pick = app.as_weak();
@@ -418,12 +506,14 @@ fn main() -> anyhow::Result<()> {
         });
 
         let files_for_remove = pending_files.clone();
+        let images_for_remove = clipboard.clone();
         let weak_remove = app.as_weak();
         app.on_remove_attachment(move |idx| {
             let idx = idx as usize;
             let mut guard = files_for_remove.lock().expect("pièces empoisonnées");
             if idx < guard.len() {
-                guard.remove(idx);
+                let path = guard.remove(idx);
+                images_for_remove.remove(&path);
                 ui::attachment_remove(&weak_remove, idx);
             }
         });

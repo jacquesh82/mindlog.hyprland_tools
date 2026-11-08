@@ -31,11 +31,18 @@ use crate::ui;
 
 /// Événements envoyés par l'UI vers la boucle agent.
 pub enum UserEvent {
-    Input { text: String, files: Vec<PathBuf> },
+    Input {
+        text: String,
+        files: Vec<PathBuf>,
+        pasted_images: Vec<tempfile::TempPath>,
+    },
     Reset,
     ConfigUpdated(Box<ChatConfig>),
     Restore(String),
-    Choice { display: String, context: String },
+    Choice {
+        display: String,
+        context: String,
+    },
     FilesystemChanged,
     EnvironmentRefresh,
 }
@@ -284,6 +291,7 @@ pub async fn run(
                 UserEvent::Input {
                     text: context,
                     files: Vec::new(),
+                    pasted_images: Vec::new(),
                 },
                 Some(display),
             ),
@@ -327,7 +335,11 @@ pub async fn run(
                 ui::set_status(&weak, &translations.settings_saved);
                 ui::append(&weak, "status", &translations.settings_saved);
             }
-            UserEvent::Input { text, files } => {
+            UserEvent::Input {
+                text,
+                files,
+                pasted_images: _pasted_images,
+            } => {
                 let visible_text = choice_display.as_deref().unwrap_or(&text);
                 let mut bubble = visible_text.to_string();
                 for f in &files {
@@ -491,6 +503,7 @@ fn available_functions(
         })
         .unwrap_or_default();
     functions.extend(crate::choices::tool_definitions());
+    functions.push(crate::contrast::definition());
     functions.extend(crate::web::definitions());
     functions.extend(filesystem.tool_definitions());
     if filesystem.approved() {
@@ -529,7 +542,12 @@ fn runtime_system(
         "\nCurrent UTC time: {}",
         timefmt::iso(std::time::SystemTime::now())
     ));
-    build_system(cfg.lang(), Some(&instructions), &cfg.system_context)
+    build_system_with_scope(
+        cfg.lang(),
+        Some(&instructions),
+        &cfg.system_context,
+        cfg.limit_wayland_scope,
+    )
 }
 
 fn build_llm(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> Claude {
@@ -549,22 +567,38 @@ pub(crate) fn build_system(
     server_instructions: Option<&str>,
     custom_context: &str,
 ) -> String {
+    build_system_with_scope(lang, server_instructions, custom_context, true)
+}
+
+pub(crate) fn build_system_with_scope(
+    lang: Lang,
+    server_instructions: Option<&str>,
+    custom_context: &str,
+    limit_wayland_scope: bool,
+) -> String {
     let mut system = if custom_context.trim().is_empty() {
-        match lang {
-            Lang::Fr => String::from(
-                "Tu es LYRA, l'assistante du bureau Hyprland, de Wayland et de leur outillage, dans une fenêtre de chat native. \
+        if !limit_wayland_scope {
+            match lang {
+                Lang::Fr => "Tu es LYRA, une assistante généraliste dans une fenêtre native. Réponds en français aux demandes de l'utilisateur, de façon claire et utile. Utilise les outils disponibles lorsque cela aide, en respectant les autorisations et confirmations.".into(),
+                Lang::En => "You are LYRA, a general-purpose assistant in a native chat window. Answer the user's requests clearly and helpfully in English. Use available tools when helpful while preserving permissions and confirmations.".into(),
+            }
+        } else {
+            match lang {
+                Lang::Fr => String::from(
+                    "Tu es LYRA, l'assistante du bureau Hyprland, de Wayland et de leur outillage, dans une fenêtre de chat native. \
 Réponds en français, de façon concise et actionnable. Tu configures l'interface de l'utilisateur \
 en direct : utilise les outils disponibles plutôt que de longues explications. Préviens avec \
 hypr_notify avant un changement visible important. Si une demande est ambiguë ou risquée \
 (perte de données, écrans, saisie), demande confirmation.",
-            ),
-            Lang::En => String::from(
-                "You are LYRA, the Hyprland, Wayland, and related desktop tools assistant, living in a native chat window. \
+                ),
+                Lang::En => String::from(
+                    "You are LYRA, the Hyprland, Wayland, and related desktop tools assistant, living in a native chat window. \
 Answer concisely and actionably, in English. You configure the user's interface live: prefer using \
 the available tools over long explanations. Warn with hypr_notify before any major visible change. \
 If a request is ambiguous or risky (data loss, monitors, input), ask for confirmation. \
 (The server instructions below are written in French.)",
-            ),
+                ),
+            }
         }
     } else {
         custom_context.trim().to_string()
@@ -577,8 +611,13 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
         system.push_str("\n\n—— Server instructions ——\n");
         system.push_str(instructions);
     }
+    system.push_str(&crate::contrast::instructions(lang));
     system.push_str(crate::reliability::instructions(lang));
-    system.push_str(&crate::scope::instructions(lang));
+    if limit_wayland_scope {
+        system.push_str(&crate::scope::instructions(lang));
+    } else {
+        system.push_str(crate::scope::unrestricted(lang));
+    }
     system
 }
 
@@ -675,6 +714,14 @@ async fn run_turn(
                 ui::set_row(weak, row, "tool", &details);
                 let out = if tc.name == crate::choices::PALETTE_TOOL {
                     crate::choices::palette_catalog().to_string()
+                } else if tc.name == crate::contrast::TOOL {
+                    let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+                    match crate::contrast::call(&args) {
+                        Ok(value) => value.to_string(),
+                        Err(error) => {
+                            json!({"error":error.to_string(),"verified":false}).to_string()
+                        }
+                    }
                 } else if crate::web::is_tool(&tc.name) {
                     let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
                     match crate::web::call(&tc.name, &args).await {
@@ -888,7 +935,7 @@ mod tests {
             dir.path().join("missing-config"),
             dir.path().join("backups"),
         );
-        assert_eq!(available_functions(None, &fs).len(), 4);
+        assert_eq!(available_functions(None, &fs).len(), 5);
         let images = json!({"question":"Choose","options":[
             {"id":"a","label":"A","image_path":"/missing-private-file.png"},
             {"id":"b","label":"B"}
@@ -905,7 +952,7 @@ mod tests {
         .to_string();
         assert!(authorized_choices(&colors, &fs).is_ok());
         fs.set_approved(true);
-        assert_eq!(available_functions(None, &fs).len(), 8);
+        assert_eq!(available_functions(None, &fs).len(), 9);
     }
 
     #[test]
@@ -923,6 +970,8 @@ mod tests {
         assert!(system.contains("lyra_web_search"));
         assert!(system.contains("lyra_web_fetch"));
         assert!(system.contains("lyra_run_command"));
+        assert!(system.contains("lyra_check_contrast"));
+        assert!(system.contains("WCAG 2.2 AA"));
         assert!(system.contains("requires native user confirmation"));
         assert!(
             system.ends_with(crate::scope::redirect(Lang::En)),
@@ -931,6 +980,22 @@ mod tests {
         assert!(build_system(Lang::Fr, None, custom).ends_with(crate::scope::redirect(Lang::Fr)));
         assert!(build_system(Lang::Fr, None, "").starts_with("Tu es LYRA"));
         assert!(build_system(Lang::En, None, "   ").starts_with("You are LYRA"));
+    }
+
+    #[test]
+    fn disabling_scope_removes_redirection_and_retains_permissions_and_contrast() {
+        for lang in [Lang::Fr, Lang::En] {
+            let system = build_system_with_scope(lang, None, "", false);
+            assert!(system.ends_with(crate::scope::unrestricted(lang)));
+            assert!(!system.contains(crate::scope::redirect(lang)));
+            assert!(system.contains("lyra_run_command"));
+            assert!(system.contains("lyra_check_contrast"));
+            let custom =
+                build_system_with_scope(lang, None, "Only answer Hyprland questions.", false);
+            assert!(custom.ends_with(crate::scope::unrestricted(lang)));
+        }
+        assert!(crate::scope::instructions(Lang::Fr).contains("thème pour Brave"));
+        assert!(crate::scope::instructions(Lang::En).contains("theme for Brave"));
     }
 
     #[test]

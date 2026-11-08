@@ -6,8 +6,9 @@ LYRA is a native chat app for exploring your setup, trying desktop settings,
 and choosing a look that suits you. It works with your existing **Zcode,
 Claude Code, or Codex subscription**.
 
-Its SYSTEM context keeps the conversation focused on **Hyprland, Wayland, and
-their related tools**. Unrelated requests receive a brief redirect.
+By default, LYRA focuses on **Hyprland, Wayland, desktop applications, browsers,
+and themes**. Turn off **Settings → Limit actions to the Wayland desktop** to
+allow general requests. Command confirmations and filesystem permissions still apply.
 
 ![LYRA interface with desktop suggestions, chat, and subscription selector](docs/images/lyra.png)
 
@@ -19,8 +20,13 @@ their related tools**. Unrelated requests receive a brief redirect.
 
 Click LYRA’s suggestions to choose text, colors, images, or diagrams.
 Use **Attach** to send images and text files along with your message.
+Paste an image with **Ctrl+V**, **Shift+Insert**, or the clipboard button. It stays
+in the draft until you send it; ordinary text paste still works.
 Responses appear progressively as LYRA writes, with a visible thinking indicator
 while it prepares its answer.
+
+Interface color suggestions follow the [color accessibility policy](docs/COLOR_ACCESSIBILITY.md):
+computed WCAG contrast, corrections for failing BG/FG pairs, and checks across states.
 
 ## Install from source
 

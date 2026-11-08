@@ -51,11 +51,13 @@ export struct TrTexts {
     settings-clients: string, settings-clients-ok: string, settings-clients-missing: string,
     settings-saved: string, settings-invalid: string,
     settings-motion: string,
+    settings-scope: string, settings-scope-hint: string,
     settings-context: string, settings-context-hint: string, settings-context-invalid: string,
     fs-title: string, fs-body: string, fs-note: string, fs-allow: string, fs-refuse: string,
     fs-granted: string, fs-denied: string, fs-request: string, fs-revoke: string,
     command-title: string, command-note: string, command-run: string, command-decline: string,
     command-waiting: string, command-declined: string,
+    paste-image: string, paste-label: string, paste-reading: string, paste-added: string, paste-empty: string, paste-error: string,
     environment-title: string, environment-note: string, environment-refresh: string,
     provider: string, subscription-hint: string,
     history-title: string, history-hint: string, history-empty: string,
@@ -104,6 +106,7 @@ export component ChatWindow inherits Window {
     in-out property <string> cfg-api-key: "";
     in-out property <string> settings-error;
     in-out property <bool> cfg-animate-avatar: true;
+    in-out property <bool> cfg-limit-wayland-scope: true;
     in-out property <string> cfg-system-context;
     in-out property <bool> fs-approved: false;
     in-out property <string> fs-root: "~/.config";
@@ -138,6 +141,9 @@ export component ChatWindow inherits Window {
     callback provider-selected(int);
     callback new-conversation();
     callback attach-clicked();
+    callback paste-clipboard(bool);
+    in-out property <bool> paste-in-progress: false;
+    public function paste-text() { le.paste(); }
     callback remove-attachment(int);
     callback open-settings();
     callback close-overlay();
@@ -563,13 +569,21 @@ export component ChatWindow inherits Window {
                             placeholder-text: root.tr.placeholder;
                             accessible-label: root.tr.placeholder;
                             enabled: root.interactive;
+                            key-pressed(event) => {
+                                if (event.modifiers.control && (event.text == "v" || event.text == "V"))
+                                    || (event.modifiers.shift && event.text == Key.Insert) {
+                                    root.paste-clipboard(false);
+                                    return accept;
+                                }
+                                return reject;
+                            }
                             edited => {
                                 root.typing-active = true;
                                 typing-timer.start();
                                 typing-timer.restart();
                             }
                             accepted(t) => {
-                                if t != "" || root.attachments.length > 0 {
+                                if !root.paste-in-progress && (t != "" || root.attachments.length > 0) {
                                     root.send(t);
                                     le.text = "";
                                 }
@@ -583,6 +597,14 @@ export component ChatWindow inherits Window {
                                 height: 32px;
                                 enabled: root.interactive;
                                 clicked => { root.attach-clicked(); }
+                            }
+                            ActionButton {
+                                text: root.tr.paste-image;
+                                icon: @image-url("../assets/icons/clipboard.svg");
+                                icon-only: true;
+                                height: 32px;
+                                enabled: root.interactive && !root.paste-in-progress;
+                                clicked => { root.paste-clipboard(true); }
                             }
                             ComboBox {
                                 model: ["Zcode", "Claude Code", "Codex"];
@@ -608,7 +630,7 @@ export component ChatWindow inherits Window {
                                 icon: @image-url("../assets/icons/arrow-up.svg");
                                 primary: true;
                                 height: 32px;
-                                enabled: root.interactive && (le.text != "" || root.attachments.length > 0);
+                                enabled: root.interactive && !root.paste-in-progress && (le.text != "" || root.attachments.length > 0);
                                 clicked => {
                                     root.send(le.text);
                                     le.text = "";
@@ -823,6 +845,16 @@ export component ChatWindow inherits Window {
                                     CheckBox {
                                         text: root.tr.settings-motion;
                                         checked <=> root.cfg-animate-avatar;
+                                    }
+                                    CheckBox {
+                                        text: root.tr.settings-scope;
+                                        checked <=> root.cfg-limit-wayland-scope;
+                                    }
+                                    Text {
+                                        text: root.tr.settings-scope-hint;
+                                        color: Theme.secondary;
+                                        font-size: 12px;
+                                        wrap: word-wrap;
                                     }
                                     HorizontalLayout {
                                         min-height: 38px;

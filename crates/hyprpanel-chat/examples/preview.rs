@@ -22,6 +22,7 @@ slint::include_modules!();
 struct PreviewPlatform {
     window: Rc<MinimalSoftwareWindow>,
     started: Instant,
+    clipboard: Rc<RefCell<String>>,
 }
 
 impl Platform for PreviewPlatform {
@@ -31,6 +32,15 @@ impl Platform for PreviewPlatform {
 
     fn duration_since_start(&self) -> std::time::Duration {
         self.started.elapsed()
+    }
+    fn set_clipboard_text(&self, text: &str, clipboard: slint::platform::Clipboard) {
+        if matches!(clipboard, slint::platform::Clipboard::DefaultClipboard) {
+            *self.clipboard.borrow_mut() = text.into();
+        }
+    }
+    fn clipboard_text(&self, clipboard: slint::platform::Clipboard) -> Option<String> {
+        matches!(clipboard, slint::platform::Clipboard::DefaultClipboard)
+            .then(|| self.clipboard.borrow().clone())
     }
 }
 
@@ -93,13 +103,18 @@ fn main() -> anyhow::Result<()> {
     let out = Path::new(&out);
     std::fs::create_dir_all(out)?;
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+    let text_clipboard = Rc::new(RefCell::new(String::new()));
     slint::platform::set_platform(Box::new(PreviewPlatform {
         window: window.clone(),
         started: Instant::now(),
+        clipboard: text_clipboard.clone(),
     }))?;
     let app = ChatWindow::new()?;
     avatar::install(&app);
     app.set_animations_enabled(false);
+    let pasted = Rc::new(RefCell::new(Vec::new()));
+    let pasted_callback = pasted.clone();
+    app.on_paste_clipboard(move |image_only| pasted_callback.borrow_mut().push(image_only));
     app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
     app.set_status("MCP : 20 outils".into());
     app.set_model_label("GLM-5.3".into());
@@ -307,7 +322,30 @@ fn main() -> anyhow::Result<()> {
         !app.get_cfg_animate_avatar(),
         "la préférence d’animation doit être modifiable"
     );
-    click(&app, 450., 278.);
+    // Focus du panneau -> fermer -> langue -> animation -> périmètre.
+    for _ in 0..4 {
+        let key = slint::platform::Key::Tab;
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    }
+    app.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: " ".into() });
+    app.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: " ".into() });
+    assert!(
+        !app.get_cfg_limit_wayland_scope(),
+        "le périmètre doit pouvoir être désactivé au clavier"
+    );
+    for _ in 0..2 {
+        app.window().dispatch_event(WindowEvent::KeyPressed {
+            text: slint::platform::Key::Tab.into(),
+        });
+        app.window().dispatch_event(WindowEvent::KeyReleased {
+            text: slint::platform::Key::Tab.into(),
+        });
+    }
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
     });
@@ -944,7 +982,57 @@ fn main() -> anyhow::Result<()> {
     let changed = providers.clone();
     app.on_provider_selected(move |index| changed.borrow_mut().push(index));
     app.invoke_focus_composer();
+    app.set_draft("keep this draft".into());
+    *text_clipboard.borrow_mut() = "pasted text".into();
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Control.into(),
+    });
+    app.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "a".into() });
+    app.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: "a".into() });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Control.into(),
+    });
+    app.invoke_paste_text();
+    assert_eq!(
+        app.get_draft(),
+        "pasted text",
+        "le retour au collage natif de texte doit conserver la sélection"
+    );
+    app.set_draft("keep this draft".into());
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Control.into(),
+    });
+    app.window()
+        .dispatch_event(WindowEvent::KeyPressed { text: "v".into() });
+    app.window()
+        .dispatch_event(WindowEvent::KeyReleased { text: "v".into() });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Control.into(),
+    });
+    assert_eq!(
+        &*pasted.borrow(),
+        &[false],
+        "Ctrl+V demande un collage sans envoyer le message"
+    );
+    assert_eq!(app.get_draft(), "keep this draft");
+    app.set_paste_in_progress(true);
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Return.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Return.into(),
+    });
+    assert_eq!(
+        app.get_draft(),
+        "keep this draft",
+        "Entrée ne doit pas perdre le brouillon pendant la lecture"
+    );
+    app.set_paste_in_progress(false);
+    app.set_draft("".into());
     for key in [
+        slint::platform::Key::Tab,
         slint::platform::Key::Tab,
         slint::platform::Key::Tab,
         slint::platform::Key::DownArrow,

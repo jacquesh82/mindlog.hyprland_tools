@@ -55,6 +55,8 @@ pub struct ChatConfig {
     /// Vide = rôle LYRA par défaut ; sinon remplace ce rôle pour les trois modes.
     #[serde(default)]
     pub system_context: String,
+    #[serde(default = "default_scope_limit")]
+    pub limit_wayland_scope: bool,
     pub base_url: String,
     pub api_key: String,
     pub model: String,
@@ -111,6 +113,10 @@ fn default_animate_avatar() -> bool {
     true
 }
 
+fn default_scope_limit() -> bool {
+    true
+}
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
 }
@@ -141,6 +147,7 @@ impl ChatConfig {
             claude_model: String::new(),
             codex_model: String::new(),
             system_context: String::new(),
+            limit_wayland_scope: true,
             base_url: ZCODE_SUBSCRIPTION_URL.into(),
             api_key: String::new(),
             model: "GLM-5.3".into(),
@@ -358,4 +365,26 @@ mod tests {
         assert_eq!(Provider::from_index(-1), None);
         assert_eq!(Provider::from_index(3), None);
     }
+}
+#[test]
+fn wayland_scope_defaults_on_for_old_configs_and_can_be_disabled() {
+    let mut cfg = ChatConfig::defaults();
+    assert!(cfg.limit_wayland_scope);
+    let old = cfg
+        .as_toml()
+        .lines()
+        .filter(|line| !line.starts_with("limit_wayland_scope"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        toml::from_str::<ChatConfig>(&old)
+            .unwrap()
+            .limit_wayland_scope
+    );
+    cfg.limit_wayland_scope = false;
+    assert!(
+        !toml::from_str::<ChatConfig>(&cfg.as_toml())
+            .unwrap()
+            .limit_wayland_scope
+    );
 }

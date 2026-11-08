@@ -10,6 +10,11 @@ export global Theme {
     out property <color> secondary: #ADB8C8;
     out property <color> muted: #8A97AA;
     out property <color> accent: #7BDACD;
+    out property <color> on-primary: #102C2A;
+    out property <color> hover: #29343F;
+    out property <color> pressed: #304B50;
+    out property <color> primary-hover: #9AE7DC;
+    out property <color> primary-pressed: #6CCABD;
 }
 
 export global AvatarFrames {
@@ -70,9 +75,9 @@ export component ActionButton inherits Rectangle {
     forward-focus: control;
     Rectangle {
         border-radius: 8px;
-        background: !root.enabled ? Theme.panel : control.pressed ? #304B50 : root.primary ? (hover.has-hover ? #9AE7DC : Theme.accent) : hover.has-hover ? #29343F : root.filled ? Theme.raised : Theme.canvas;
-        border-width: 1px;
-        border-color: control.has-focus ? Theme.accent : root.filled ? Theme.border : transparent;
+        background: !root.enabled ? Theme.panel : root.primary ? (control.pressed ? Theme.primary-pressed : hover.has-hover ? Theme.primary-hover : Theme.accent) : control.pressed ? Theme.pressed : hover.has-hover ? Theme.hover : root.filled ? Theme.raised : Theme.canvas;
+        border-width: control.has-focus ? 2px : 1px;
+        border-color: control.has-focus ? (root.primary ? Theme.on-primary : Theme.accent) : root.filled ? Theme.border : transparent;
         content := HorizontalLayout {
             padding-left: 12px;
             padding-right: 12px;
@@ -83,11 +88,11 @@ export component ActionButton inherits Rectangle {
                 height: 16px;
                 y: (parent.height - self.height) / 2;
                 source: root.icon;
-                colorize: !root.enabled ? Theme.muted : root.primary ? #102C2A : Theme.secondary;
+                colorize: !root.enabled ? Theme.muted : root.primary ? Theme.on-primary : Theme.secondary;
             }
             if !root.icon-only: Text {
                 text: root.text;
-                color: !root.enabled ? Theme.muted : root.primary ? #102C2A : root.link ? Theme.accent : Theme.text;
+                color: !root.enabled ? Theme.muted : root.primary ? Theme.on-primary : root.link ? Theme.accent : Theme.text;
                 font-size: 13px;
                 font-weight: 500;
                 vertical-alignment: center;

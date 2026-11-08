@@ -44,6 +44,12 @@ pub struct Tr {
     pub status_writing: String,
     pub placeholder: String,
     pub attach: String,
+    pub paste_image: String,
+    pub paste_label: String,
+    pub paste_reading: String,
+    pub paste_added: String,
+    pub paste_empty: String,
+    pub paste_error: String,
     // header
     pub tip_help: String,
     pub tip_settings: String,
@@ -83,6 +89,8 @@ pub struct Tr {
     pub settings_saved: String,
     pub settings_invalid: String,
     pub settings_motion: String,
+    pub settings_scope: String,
+    pub settings_scope_hint: String,
     pub settings_context: String,
     pub settings_context_hint: String,
     pub settings_context_invalid: String,
@@ -156,7 +164,7 @@ ACCÈS AUX FICHIERS — LYRA demande votre accord pour consulter et modifier ~/.
 CE QU'ELLE SAIT FAIRE
 • Lire l'état : écrans, espaces de travail, fenêtres, périphériques, raccourcis, options.
 • Régler : gaps, bordures, animations, opacité, règles de fenêtres, raccourcis clavier…
-• Pièces jointes : bouton « Joindre » — images (elle les voit) et fichiers texte (elle les lit).
+• Pièces jointes : bouton « Joindre » — images (elle les voit) et fichiers texte (elle les lit). Ctrl+V ou « Coller une image » ajoute une image du presse-papiers ; elle est transmise uniquement à l’envoi du message.
 • Captures d'écran (grim) pour constater visuellement un changement, notifications à l'écran.
 
 GARDE-FOUS
@@ -182,7 +190,7 @@ FILESYSTEM ACCESS — LYRA asks permission to read and edit ~/.config. Declining
 WHAT SHE CAN DO
 • Read state: monitors, workspaces, windows, devices, keybindings, options.
 • Tune: gaps, borders, animations, opacity, window rules, keybindings…
-• Attachments: the “Attach” button — images (she sees them) and text files (she reads them).
+• Attachments: the “Attach” button — images (she sees them) and text files (she reads them). Ctrl+V or “Paste image” adds an image from the clipboard; it is shared only when you send the message.
 • Screenshots (grim) to visually confirm a change, on-screen notifications.
 
 SAFETY
@@ -226,6 +234,12 @@ fn french() -> Tr {
         status_writing: "LYRA écrit…".into(),
         placeholder: "Que souhaitez-vous changer sur votre bureau ?".into(),
         attach: "Joindre".into(),
+        paste_image: "Coller une image".into(),
+        paste_label: "Image collée".into(),
+        paste_reading: "Lecture du presse-papiers…".into(),
+        paste_added: "Image ajoutée. Envoyez le message pour la partager avec LYRA.".into(),
+        paste_empty: "Aucune image compatible dans le presse-papiers.".into(),
+        paste_error: "Impossible de coller l’image".into(),
         tip_help: "Aide".into(),
         tip_settings: "Réglages".into(),
         tip_history: "Historique de configuration".into(),
@@ -238,7 +252,7 @@ fn french() -> Tr {
         welcome_title: "Bonjour, je suis LYRA.".into(),
         welcome_l1: "Un bureau qui vous ressemble. Décrivez vos envies, je m’occupe des réglages.".into(),
         welcome_l2: "Des essais réversibles. L’accès à vos fichiers reste votre choix.".into(),
-        welcome_l3: "Vous pouvez joindre des images et des fichiers texte avec « Joindre ».".into(),
+        welcome_l3: "Joignez des fichiers avec « Joindre » ou collez une image avec Ctrl+V.".into(),
         welcome_examples: "Un point de départ pour votre prochaine idée".into(),
         ex1: "Montre l'état de mes écrans".into(),
         ex2: "Essaie des gaps de 10, puis remets comme avant".into(),
@@ -260,8 +274,10 @@ fn french() -> Tr {
         settings_saved: "réglages enregistrés".into(),
         settings_invalid: "Vérifiez le modèle et la limite de tokens (256 à 200 000).".into(),
         settings_motion: "Animer l’avatar de LYRA".into(),
+        settings_scope: "Limiter les actions au périmètre Wayland".into(),
+        settings_scope_hint: "Activé : bureau, applications, navigateurs et thèmes compris. Désactivé : demandes générales autorisées. Les permissions des fichiers et confirmations de commandes restent obligatoires.".into(),
         settings_context: "Contexte SYSTEM".into(),
-        settings_context_hint: "Instructions communes aux trois fournisseurs. Laissez vide pour le rôle LYRA par défaut ; votre texte le remplace. Le périmètre Hyprland/Wayland, les vérifications et confirmations restent appliqués. 16 000 caractères maximum.".into(),
+        settings_context_hint: "Instructions communes aux trois fournisseurs. Laissez vide pour le rôle LYRA par défaut ; votre texte le remplace. Le périmètre choisi, les vérifications et confirmations restent appliqués. 16 000 caractères maximum.".into(),
         settings_context_invalid: "Le contexte SYSTEM doit contenir au maximum 16 000 caractères.".into(),
         fs_title: "Autoriser l’accès aux fichiers ?".into(),
         fs_body: "Autorisez-vous LYRA à lire et modifier vos configurations et à mémoriser votre environnement (OS, version, utilisateur, session, outils) ? Ces informations peuvent être transmises au fournisseur sélectionné pour traiter vos demandes.".into(),
@@ -324,6 +340,12 @@ fn english() -> Tr {
         status_writing: "LYRA is writing…".into(),
         placeholder: "What would you like to change on your desktop?".into(),
         attach: "Attach".into(),
+        paste_image: "Paste image".into(),
+        paste_label: "Pasted image".into(),
+        paste_reading: "Reading clipboard…".into(),
+        paste_added: "Image attached. Send the message to share it with LYRA.".into(),
+        paste_empty: "No supported image in the clipboard.".into(),
+        paste_error: "Could not paste the image".into(),
         tip_help: "Help".into(),
         tip_settings: "Settings".into(),
         tip_history: "Configuration history".into(),
@@ -336,7 +358,7 @@ fn english() -> Tr {
         welcome_title: "Hi, I'm LYRA.".into(),
         welcome_l1: "A desktop that feels like you. Tell me what you have in mind, I’ll handle the settings.".into(),
         welcome_l2: "Reversible changes. File access stays your choice.".into(),
-        welcome_l3: "You can attach images and text files with “Attach”.".into(),
+        welcome_l3: "Attach files with “Attach”, or paste an image with Ctrl+V.".into(),
         welcome_examples: "A starting point for your next idea".into(),
         ex1: "Show my monitors".into(),
         ex2: "Set gaps to 10 just to try, then revert".into(),
@@ -358,8 +380,10 @@ fn english() -> Tr {
         settings_saved: "settings saved".into(),
         settings_invalid: "Check the model and token limit (256 to 200,000).".into(),
         settings_motion: "Animate LYRA’s avatar".into(),
+        settings_scope: "Limit actions to the Wayland desktop".into(),
+        settings_scope_hint: "On: desktop, applications, browsers and themes are included. Off: general requests are allowed. Filesystem permissions and command confirmations still apply.".into(),
         settings_context: "SYSTEM context".into(),
-        settings_context_hint: "Instructions shared by all three providers. Leave empty for LYRA’s default role; your text replaces it. Hyprland/Wayland scope, verification and confirmation rules still apply. Maximum 16,000 characters.".into(),
+        settings_context_hint: "Instructions shared by all three providers. Leave empty for LYRA’s default role; your text replaces it. The selected scope, verification and confirmation rules still apply. Maximum 16,000 characters.".into(),
         settings_context_invalid: "The SYSTEM context must not exceed 16,000 characters.".into(),
         fs_title: "Allow filesystem access?".into(),
         fs_body: "Allow LYRA to read and edit configurations and remember your environment (OS, version, user, session, tools)? This information may be sent to the selected provider to handle your requests.".into(),
@@ -423,6 +447,12 @@ impl Tr {
             status_writing: self.status_writing.clone().into(),
             placeholder: self.placeholder.clone().into(),
             attach: self.attach.clone().into(),
+            paste_image: self.paste_image.clone().into(),
+            paste_label: self.paste_label.clone().into(),
+            paste_reading: self.paste_reading.clone().into(),
+            paste_added: self.paste_added.clone().into(),
+            paste_empty: self.paste_empty.clone().into(),
+            paste_error: self.paste_error.clone().into(),
             tip_help: self.tip_help.clone().into(),
             tip_settings: self.tip_settings.clone().into(),
             tip_history: self.tip_history.clone().into(),
@@ -457,6 +487,8 @@ impl Tr {
             settings_saved: self.settings_saved.clone().into(),
             settings_invalid: self.settings_invalid.clone().into(),
             settings_motion: self.settings_motion.clone().into(),
+            settings_scope: self.settings_scope.clone().into(),
+            settings_scope_hint: self.settings_scope_hint.clone().into(),
             settings_context: self.settings_context.clone().into(),
             settings_context_hint: self.settings_context_hint.clone().into(),
             settings_context_invalid: self.settings_context_invalid.clone().into(),

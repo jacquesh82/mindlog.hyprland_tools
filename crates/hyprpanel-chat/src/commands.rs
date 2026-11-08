@@ -82,7 +82,7 @@ impl Approvals {
 pub fn definition() -> FunctionDefinition {
     FunctionDefinition::new(
         TOOL,
-        "Propose une commande shell pour Hyprland/Wayland et leurs outils. L'utilisateur voit la commande exacte, sa raison et confirme chaque exécution dans une boîte native ; un oui dans le chat ne suffit pas. Ne pas retenter après un refus. Pas de saisie interactive, timeout 60 s, sortie bornée. Aucune commande n'est exécutée pour détecter l'environnement automatiquement.",
+        "Propose une commande shell pour traiter la demande de l'utilisateur, dans le périmètre actuellement autorisé. L'utilisateur voit la commande exacte, sa raison et confirme chaque exécution dans une boîte native ; un oui dans le chat ne suffit pas. Ne pas retenter après un refus. Pas de saisie interactive, timeout 60 s, sortie bornée. Aucune commande n'est exécutée pour détecter l'environnement automatiquement.",
         json!({"type":"object","required":["command","reason"],"properties":{"command":{"type":"string","description":"Script /bin/sh exact, sans placeholder ni secret. Une opération cohérente par demande."},"reason":{"type":"string","description":"But concret et effets attendus, risques ou privilèges nécessaires, dans la langue de l'utilisateur."}}}),
     )
 }
