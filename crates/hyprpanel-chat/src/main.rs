@@ -6,13 +6,17 @@ mod agent;
 mod avatar;
 mod chat_config;
 mod choices;
+mod commands;
+mod environment;
 mod filesystem;
 mod i18n;
 mod mcp;
 mod providers;
+mod reliability;
 mod rich_text;
 mod scope;
 mod ui;
+mod web;
 
 use anyhow::Context;
 
@@ -26,10 +30,13 @@ USAGE
   hyprpanel-chat init      Crée ~/.config/hyprpanel/chat.toml (clé reprise de
                            la config Zcode si disponible) et affiche l'état
   hyprpanel-chat --help    Cette aide
-  hyprpanel-chat check-providers [--live] [--scope]
+  hyprpanel-chat check-providers [--live] [--scope] [--policy]
                            Vérifie les connexions ; --live teste les trois
                            abonnements et les choix sans modifier le bureau
                            --scope teste le périmètre par de vrais appels
+                           --policy teste les demandes web et commandes,
+                           sans exécuter les outils proposés
+  hyprpanel-chat check-web Teste la lecture HTTPS du wiki officiel Hyprland
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -42,7 +49,23 @@ fn main() -> anyhow::Result<()> {
                 &cfg,
                 args.iter().any(|a| a == "--live"),
                 args.iter().any(|a| a == "--scope"),
+                args.iter().any(|a| a == "--policy"),
             ));
+        }
+        Some("check-web") => {
+            return tokio::runtime::Runtime::new()?.block_on(async {
+                let result = web::call(
+                    web::FETCH,
+                    &serde_json::json!({"url":"https://wiki.hypr.land/"}),
+                )
+                .await?;
+                println!(
+                    "{} : {} caractères lus",
+                    result["url"].as_str().unwrap_or(""),
+                    result["content"].as_str().unwrap_or("").len()
+                );
+                Ok(())
+            });
         }
         Some("--help") | Some("-h") | Some("help") => {
             print!("{USAGE}");
@@ -110,6 +133,33 @@ fn main() -> anyhow::Result<()> {
     // UI → agent : canal non borné ; l'agent tourne dans un runtime tokio
     // hébergé par un thread dédié, la boucle d'événements Slint garde le main.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<agent::UserEvent>();
+    let approvals = commands::Approvals::default();
+    {
+        let approvals = approvals.clone();
+        let weak = app.as_weak();
+        app.on_command_decision(move |id, approved| {
+            if let Some(app) = weak.upgrade() {
+                if app.get_overlay() == "command" && app.get_command_id() == id {
+                    app.set_overlay("none".into());
+                    app.set_command_text("".into());
+                    app.set_command_reason("".into());
+                    app.set_activity("tools".into());
+                    app.set_status(if approved {
+                        app.get_tr().status_tools
+                    } else {
+                        app.get_tr().command_declined
+                    });
+                    approvals.answer(id, approved);
+                }
+            }
+        });
+    }
+    {
+        let tx = tx.clone();
+        app.on_refresh_environment(move || {
+            let _ = tx.send(agent::UserEvent::EnvironmentRefresh);
+        });
+    }
     {
         let fs = filesystem.clone();
         let tx_fs = tx.clone();
@@ -321,6 +371,8 @@ fn main() -> anyhow::Result<()> {
             if let Some(app) = weak_close.upgrade() {
                 if app.get_overlay() == "filesystem" {
                     app.invoke_finish_filesystem(app.get_fs_approved());
+                } else if app.get_overlay() == "command" {
+                    app.invoke_command_decision(app.get_command_id(), false);
                 } else {
                     app.set_overlay("none".into());
                 }
@@ -391,7 +443,7 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
-            runtime.block_on(agent::run(cfg, rx, weak, filesystem));
+            runtime.block_on(agent::run(cfg, rx, weak, filesystem, approvals));
         })
         .context("thread agent")?;
 

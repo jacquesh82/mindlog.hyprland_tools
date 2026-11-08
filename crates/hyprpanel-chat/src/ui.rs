@@ -105,6 +105,9 @@ pub fn set_busy(weak: &Weak<ChatWindow>, busy: bool) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_busy(busy);
+            if !busy && ui.get_overlay() == "none" {
+                ui.invoke_focus_composer();
+            }
         }
     });
 }

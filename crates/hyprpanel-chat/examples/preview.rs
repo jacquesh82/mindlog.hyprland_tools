@@ -130,6 +130,8 @@ fn main() -> anyhow::Result<()> {
         if let Some(app) = weak.upgrade() {
             if app.get_overlay() == "filesystem" {
                 app.invoke_finish_filesystem(app.get_fs_approved());
+            } else if app.get_overlay() == "command" {
+                app.invoke_command_decision(app.get_command_id(), false);
             } else {
                 app.set_overlay("none".into());
             }
@@ -836,6 +838,97 @@ fn main() -> anyhow::Result<()> {
         600,
     )?;
     app.invoke_close_overlay();
+
+    // Commandes : chaque clic porte sur l'identifiant courant ; fermer et
+    // Échap refusent. L'affichage reste lisible sur une petite fenêtre.
+    let command_decisions = Rc::new(RefCell::new(Vec::new()));
+    let captured = command_decisions.clone();
+    let weak = app.as_weak();
+    app.on_command_decision(move |id, approved| {
+        if let Some(app) = weak.upgrade() {
+            if app.get_overlay() == "command" && app.get_command_id() == id {
+                captured.borrow_mut().push((id, approved));
+                app.set_overlay("none".into());
+            }
+        }
+    });
+    app.set_tr(i18n::tr(i18n::Lang::Fr).to_slint());
+    app.set_command_id(1);
+    app.set_command_text("hyprctl version -j".into());
+    app.set_command_reason(
+        "Vérifier la version de Hyprland pour consulter la documentation correspondante.".into(),
+    );
+    app.set_busy(true);
+    app.set_activity("approval".into());
+    app.set_overlay("command".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("command-confirmation.png"),
+        1080,
+        800,
+    )?;
+    click(&app, 675., 637.);
+    assert_eq!(&*command_decisions.borrow(), &[(1, false)]);
+    app.set_command_id(2);
+    app.set_overlay("command".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("command-confirmation.png"),
+        1080,
+        800,
+    )?;
+    click(&app, 750., 637.);
+    assert_eq!(&*command_decisions.borrow(), &[(1, false), (2, true)]);
+    app.set_command_id(3);
+    app.set_overlay("command".into());
+    app.window().dispatch_event(WindowEvent::KeyPressed {
+        text: slint::platform::Key::Escape.into(),
+    });
+    app.window().dispatch_event(WindowEvent::KeyReleased {
+        text: slint::platform::Key::Escape.into(),
+    });
+    assert_eq!(
+        &*command_decisions.borrow(),
+        &[(1, false), (2, true), (3, false)]
+    );
+    app.set_tr(i18n::tr(i18n::Lang::En).to_slint());
+    app.set_command_id(4);
+    app.set_command_reason(
+        "Check the installed Hyprland version before consulting the matching documentation.".into(),
+    );
+    app.set_overlay("command".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("command-confirmation-compact.png"),
+        480,
+        600,
+    )?;
+    app.invoke_close_overlay();
+    assert_eq!(command_decisions.borrow().last(), Some(&(4, false)));
+
+    app.set_command_id(5);
+    app.set_overlay("command".into());
+    snapshot(
+        &app,
+        &window,
+        &out.join("command-confirmation-keyboard.png"),
+        1080,
+        800,
+    )?;
+    for key in [slint::platform::Key::Tab, slint::platform::Key::Return] {
+        app.window()
+            .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+        app.window()
+            .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+    }
+    assert_eq!(
+        command_decisions.borrow().last(),
+        Some(&(5, true)),
+        "la confirmation est accessible avec Tab puis Entrée"
+    );
 
     // Le sélecteur d'abonnement fonctionne aussi sans souris.
     messages.set_vec(Vec::new());

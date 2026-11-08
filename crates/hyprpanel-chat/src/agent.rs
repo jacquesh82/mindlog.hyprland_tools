@@ -37,6 +37,7 @@ pub enum UserEvent {
     Restore(String),
     Choice { display: String, context: String },
     FilesystemChanged,
+    EnvironmentRefresh,
 }
 
 const MAX_ROUNDS: usize = 12;
@@ -217,6 +218,7 @@ pub async fn run(
     mut rx: UnboundedReceiver<UserEvent>,
     weak: Weak<ChatWindow>,
     filesystem: Arc<crate::filesystem::FilesystemAccess>,
+    approvals: crate::commands::Approvals,
 ) {
     let mut cfg = cfg;
     let mut translations = tr(cfg.lang());
@@ -264,6 +266,9 @@ pub async fn run(
             None
         }
     };
+    if filesystem.approved() {
+        refresh_environment(&weak);
+    }
     let mut functions = available_functions(mcp.as_ref(), &filesystem);
 
     let mut llm = build_llm(&cfg, &functions);
@@ -286,12 +291,24 @@ pub async fn run(
         };
         match event {
             UserEvent::FilesystemChanged => {
+                if filesystem.approved() {
+                    refresh_environment(&weak);
+                } else {
+                    set_environment(&weak, String::new());
+                }
                 functions = available_functions(mcp.as_ref(), &filesystem);
                 llm = build_llm(&cfg, &functions);
                 system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
                 convo[0] = Message::new_system_message(system.clone());
                 if !filesystem.approved() {
                     convo.truncate(1);
+                }
+            }
+            UserEvent::EnvironmentRefresh => {
+                if filesystem.approved() {
+                    refresh_environment(&weak);
+                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem);
+                    convo[0] = Message::new_system_message(system.clone());
                 }
             }
             UserEvent::Choice { .. } => unreachable!("choix normalisé en message utilisateur"),
@@ -350,6 +367,7 @@ pub async fn run(
                     &translations,
                     &weak,
                     &filesystem,
+                    &approvals,
                 )
                 .await
                 {
@@ -385,6 +403,25 @@ pub async fn run(
                 };
                 let mut args = Map::new();
                 args.insert("name".into(), json!(name));
+                if !approvals
+                    .request(
+                        &weak,
+                        format!(
+                            "hypr_restore_backup({})\nhypr_reload({{}})",
+                            Value::Object(args.clone())
+                        ),
+                        translations.command_restore.clone(),
+                    )
+                    .await
+                {
+                    ui::append(&weak, "status", &translations.command_declined);
+                    ui::set_busy(&weak, false);
+                    continue;
+                }
+                if !filesystem.approved() {
+                    ui::set_busy(&weak, false);
+                    continue;
+                }
                 let outcome = match mcp.call("hypr_restore_backup", args).await {
                     Ok(report) => mcp.call("hypr_reload", Map::new()).await.map(|_| report),
                     Err(e) => Err(e),
@@ -408,6 +445,31 @@ pub async fn run(
     }
 }
 
+fn set_environment(weak: &Weak<ChatWindow>, text: String) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_environment_text(text.into());
+        }
+    });
+}
+
+fn refresh_environment(weak: &Weak<ChatWindow>) {
+    match crate::environment::refresh_at(&crate::environment::path()) {
+        Ok(profile) => set_environment(
+            weak,
+            serde_json::to_string_pretty(&profile).unwrap_or_default(),
+        ),
+        Err(error) => {
+            ui::append(
+                weak,
+                "error",
+                format!("Profil de l’environnement : {error:#}"),
+            );
+        }
+    };
+}
+
 fn available_functions(
     mcp: Option<&McpSession>,
     filesystem: &crate::filesystem::FilesystemAccess,
@@ -429,7 +491,11 @@ fn available_functions(
         })
         .unwrap_or_default();
     functions.extend(crate::choices::tool_definitions());
+    functions.extend(crate::web::definitions());
     functions.extend(filesystem.tool_definitions());
+    if filesystem.approved() {
+        functions.push(crate::commands::definition());
+    }
     functions
 }
 
@@ -457,6 +523,12 @@ fn runtime_system(
     } else {
         "No filesystem or desktop tools are authorized. Do not read, back up or modify local configuration through another mechanism. Ask the user to open Settings and allow filesystem access when needed. Explicitly attached files can still be discussed."
     });
+    instructions.push_str("\n\n");
+    instructions.push_str(&crate::environment::context(filesystem.approved()));
+    instructions.push_str(&format!(
+        "\nCurrent UTC time: {}",
+        timefmt::iso(std::time::SystemTime::now())
+    ));
     build_system(cfg.lang(), Some(&instructions), &cfg.system_context)
 }
 
@@ -505,6 +577,7 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
         system.push_str("\n\n—— Server instructions ——\n");
         system.push_str(instructions);
     }
+    system.push_str(crate::reliability::instructions(lang));
     system.push_str(&crate::scope::instructions(lang));
     system
 }
@@ -520,6 +593,7 @@ async fn run_turn(
     translations: &Tr,
     weak: &Weak<ChatWindow>,
     filesystem: &crate::filesystem::FilesystemAccess,
+    approvals: &crate::commands::Approvals,
 ) -> anyhow::Result<()> {
     cfg.validate_subscription().map_err(anyhow::Error::msg)?;
     let (message, notes) = build_user_message(user_text, files, &|p| std::fs::read(p));
@@ -577,9 +651,10 @@ async fn run_turn(
         let mut details_row = None;
         let mut details = String::new();
         let mut awaiting_choice = false;
+        let mut declined = false;
         for tc in result.tool_calls {
-            let out = if awaiting_choice {
-                json!({"status": "deferred", "reason": "awaiting_user_choice"}).to_string()
+            let out = if awaiting_choice || declined {
+                json!({"status": "deferred", "reason": if declined { "user_declined_previous_action" } else { "awaiting_user_choice" }}).to_string()
             } else if tc.name == crate::choices::OFFER_TOOL {
                 match authorized_choices(&tc.arguments, filesystem) {
                     Ok(request) => {
@@ -600,6 +675,28 @@ async fn run_turn(
                 ui::set_row(weak, row, "tool", &details);
                 let out = if tc.name == crate::choices::PALETTE_TOOL {
                     crate::choices::palette_catalog().to_string()
+                } else if crate::web::is_tool(&tc.name) {
+                    let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+                    match crate::web::call(&tc.name, &args).await {
+                        Ok(value) => value.to_string(),
+                        Err(error) => json!({"error":error.to_string(),"verified":false,"instruction":"Verification failed. Do not invent a result; fetch an official source directly or explain the uncertainty."}).to_string(),
+                    }
+                } else if tc.name == crate::commands::TOOL {
+                    let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
+                    match crate::commands::Request::parse(&args) {
+                        Ok(request) => {
+                            let confirmation = approvals.request(
+                                weak,
+                                request.command.clone(),
+                                request.reason.clone(),
+                            );
+                            match crate::commands::run(request, filesystem, confirmation).await {
+                                Ok(value) => value.to_string(),
+                                Err(error) => json!({"error":error.to_string()}).to_string(),
+                            }
+                        }
+                        Err(error) => json!({"error":error.to_string()}).to_string(),
+                    }
                 } else if crate::filesystem::FilesystemAccess::is_tool(&tc.name) {
                     let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
                     match filesystem.call(&tc.name, &args) {
@@ -610,11 +707,26 @@ async fn run_turn(
                     json!({"error":"Filesystem/desktop access is not authorized, or this raw tool is unavailable. Ask the user to review permissions in Settings."}).to_string()
                 } else if let Some(session) = session {
                     let args = parse_tool_arguments(&tc.arguments);
-                    let call = session.call(&tc.name, args);
-                    match tokio::time::timeout(TIMEOUT_TOOL, call).await {
-                        Ok(Ok(o)) => o,
-                        Ok(Err(e)) => format!("erreur outil : {e:#}"),
-                        Err(_) => format!("outil {} : timeout après 30 s", tc.name),
+                    if crate::commands::needs_mcp_approval(&tc.name)
+                        && !approvals
+                            .request(
+                                weak,
+                                format!("{}({})", tc.name, Value::Object(args.clone())),
+                                translations.command_desktop.clone(),
+                            )
+                            .await
+                    {
+                        json!({"status":"declined","instruction":"The user declined this action. Do not retry or bypass with another tool."}).to_string()
+                    } else if !filesystem.approved() {
+                        json!({"error":"Permission revoked"}).to_string()
+                    } else {
+                        ui::set_activity(weak, "tools");
+                        let call = session.call(&tc.name, args);
+                        match tokio::time::timeout(TIMEOUT_TOOL, call).await {
+                            Ok(Ok(o)) => o,
+                            Ok(Err(e)) => format!("erreur outil : {e:#}"),
+                            Err(_) => format!("outil {} : timeout après 30 s", tc.name),
+                        }
                     }
                 } else {
                     translations.mcp_unavailable.clone()
@@ -624,10 +736,17 @@ async fn run_turn(
                 ui::set_row(weak, row, "tool", &details);
                 out
             };
+            if serde_json::from_str::<Value>(&out)
+                .ok()
+                .is_some_and(|v| v["status"] == "declined")
+            {
+                declined = true;
+                ui::append(weak, "status", &translations.command_declined);
+            }
             // Tous les tool_use reçoivent un résultat, même ceux différés par le choix.
             convo.push(Message::new_tool_message(&out, tc.id.clone()));
         }
-        if awaiting_choice {
+        if awaiting_choice || declined {
             break;
         }
     }
@@ -769,7 +888,7 @@ mod tests {
             dir.path().join("missing-config"),
             dir.path().join("backups"),
         );
-        assert_eq!(available_functions(None, &fs).len(), 2);
+        assert_eq!(available_functions(None, &fs).len(), 4);
         let images = json!({"question":"Choose","options":[
             {"id":"a","label":"A","image_path":"/missing-private-file.png"},
             {"id":"b","label":"B"}
@@ -786,7 +905,7 @@ mod tests {
         .to_string();
         assert!(authorized_choices(&colors, &fs).is_ok());
         fs.set_approved(true);
-        assert_eq!(available_functions(None, &fs).len(), 5);
+        assert_eq!(available_functions(None, &fs).len(), 8);
     }
 
     #[test]
@@ -801,6 +920,10 @@ mod tests {
         assert!(!system.contains("living in a native chat window"));
         assert!(system.contains("lyra_offer_choices"));
         assert!(system.contains("Keep generated configuration files read-only."));
+        assert!(system.contains("lyra_web_search"));
+        assert!(system.contains("lyra_web_fetch"));
+        assert!(system.contains("lyra_run_command"));
+        assert!(system.contains("requires native user confirmation"));
         assert!(
             system.ends_with(crate::scope::redirect(Lang::En)),
             "le périmètre commun s'applique aussi au rôle personnalisé"

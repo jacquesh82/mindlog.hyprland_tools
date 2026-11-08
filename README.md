@@ -62,6 +62,24 @@ selected provider when needed for your requests.
 Without approval, assistant file/desktop tools and automatic configuration
 backups stay disabled. Explicitly attached files remain available.
 
+## Verification and commands
+
+When information is uncertain or depends on a recent version, LYRA is instructed
+to check online, read official documentation, and link the sources actually read.
+If verification fails, it must say so rather than invent an answer.
+
+**Commands need your confirmation each time.** LYRA shows the exact command and
+its purpose before execution. Declining, closing, or pressing Escape runs nothing.
+Filesystem permission and a “yes” in chat do not authorize a command. Hyprland
+IPC queries/actions also request confirmation; managed file reads and backups
+use the filesystem permission.
+
+After your first filesystem approval, LYRA records the OS/distribution, version,
+kernel, architecture, username, session, and available package/desktop tools in a
+private local profile. It runs no commands to discover these details. The profile
+is refreshed each approved session and can be viewed/refreshed in Settings.
+Missing tool versions stay unknown until checked with a confirmed command.
+
 ## Settings and backups
 
 - **⚙ Settings**: choose English or French, a model, and whether the avatar animates.

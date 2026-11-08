@@ -54,6 +54,9 @@ export struct TrTexts {
     settings-context: string, settings-context-hint: string, settings-context-invalid: string,
     fs-title: string, fs-body: string, fs-note: string, fs-allow: string, fs-refuse: string,
     fs-granted: string, fs-denied: string, fs-request: string, fs-revoke: string,
+    command-title: string, command-note: string, command-run: string, command-decline: string,
+    command-waiting: string, command-declined: string,
+    environment-title: string, environment-note: string, environment-refresh: string,
     provider: string, subscription-hint: string,
     history-title: string, history-hint: string, history-empty: string,
     restore: string, restore-started: string, restore-done: string, restore-failed: string,
@@ -106,6 +109,12 @@ export component ChatWindow inherits Window {
     in-out property <string> fs-root: "~/.config";
     private property <string> fs-return-overlay: "none";
     callback filesystem-decision(bool);
+    in-out property <int> command-id: 0;
+    in-out property <string> command-text;
+    in-out property <string> command-reason;
+    callback command-decision(int, bool);
+    in-out property <string> environment-text;
+    callback refresh-environment();
     public function request-filesystem() {
         root.fs-return-overlay = root.overlay;
         root.overlay = "filesystem";
@@ -214,6 +223,7 @@ export component ChatWindow inherits Window {
 
     public pure function activity-label() -> string {
         return root.activity == "writing" ? root.tr.status-writing
+            : root.activity == "approval" ? root.tr.command-waiting
             : root.activity == "tools" ? root.tr.status-tools
             : root.activity == "restore" ? root.tr.restore-started
             : root.tr.status-thinking;
@@ -672,6 +682,40 @@ export component ChatWindow inherits Window {
                     padding: 24px;
                     spacing: 10px;
 
+                    if root.overlay == "command": VerticalLayout {
+                        spacing: 14px;
+                        Timer {
+                            private property <int> focused-id: -1;
+                            interval: 1ms;
+                            running: self.focused-id != root.command-id;
+                            triggered => { self.focused-id = root.command-id; command-decline.focus(); }
+                        }
+                        PanelHeader {
+                            title: root.tr.command-title;
+                            close-label: root.tr.close;
+                            close => { root.close-overlay(); }
+                        }
+                        Text { text: root.command-reason; color: Theme.text; wrap: word-wrap; font-size: 14px; }
+                        TextEdit {
+                            text: root.command-text;
+                            read-only: true;
+                            accessible-label: root.tr.command-title;
+                            wrap: word-wrap;
+                            font-family: "monospace";
+                            vertical-stretch: 1;
+                        }
+                        Text { text: root.tr.command-note; color: Theme.secondary; wrap: word-wrap; font-size: 13px; }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 12px;
+                            command-decline := ActionButton {
+                                text: root.tr.command-decline;
+                                clicked => { root.command-decision(root.command-id, false); }
+                            }
+                            ActionButton { text: root.tr.command-run; primary: true; clicked => { root.command-decision(root.command-id, true); } }
+                        }
+                    }
+
                     if root.overlay == "filesystem": VerticalLayout {
                         spacing: 16px;
                         PanelHeader {
@@ -848,6 +892,21 @@ export component ChatWindow inherits Window {
                                         height: 160px;
                                         wrap: word-wrap;
                                         font-size: 13px;
+                                    }
+                                    Text { text: root.tr.environment-title; color: Theme.text; font-size: 14px; font-weight: 600; }
+                                    Text { text: root.tr.environment-note; color: Theme.secondary; wrap: word-wrap; font-size: 12px; }
+                                    TextEdit {
+                                        text: root.environment-text;
+                                        accessible-label: root.tr.environment-title;
+                                        read-only: true;
+                                        height: 180px;
+                                        wrap: word-wrap;
+                                        font-size: 12px;
+                                    }
+                                    ActionButton {
+                                        text: root.tr.environment-refresh;
+                                        enabled: root.fs-approved;
+                                        clicked => { root.refresh-environment(); }
                                     }
                                     Text {
                                         text: root.tr.settings-clients;

@@ -28,6 +28,7 @@ Default locations, adjusted when the corresponding XDG variables are set:
 | `~/.local/state/hyprpanel/backups/` | Hyprland configuration backups |
 | `~/.local/state/hyprpanel/file-backups/` | Previous contents saved before file-tool replacements |
 | `~/.local/state/hyprpanel/lyra-history.json` | Backup records associated with chat turns |
+| `~/.local/state/hyprpanel/environment.json` | Private local environment profile, created after filesystem approval |
 | `~/.cache/hyprpanel/screenshots/` | Screenshots |
 
 Configuration files are created with `600` permissions. To initialize them
@@ -45,8 +46,8 @@ native dialog asks whether to allow reading and editing configurations under
 `~/.config`. Closing or declining the dialog does not grant access. Settings
 lets the user grant or revoke access later; provider switching does not grant it.
 
-Before approval, LYRA exposes only text/color/SVG choices and the static palette
-catalog. It blocks assistant file/desktop tool calls, automatic Hyprland backups,
+Before approval, LYRA exposes text/color/SVG choices, the static palette catalog,
+and public web tools. It blocks assistant file/desktop tool calls, automatic Hyprland backups,
 restoration, and model-proposed local image previews. Files explicitly selected
 and sent by the user are separately authorized attachments.
 
@@ -65,8 +66,10 @@ directory is excluded, including aliases. Generated `monitors.lua` and
 save the previous content under `file-backups` before an atomic write.
 
 The generic `hypr_eval` and `hypr_dispatch` tools are not exposed or accepted by
-LYRA: raw Lua or arbitrary commands could bypass the file-tool restrictions.
-Specialized Hyprland tools require approval. The independent MCP service still
+LYRA. Shell commands use a separate, explicit per-command confirmation;
+approving filesystem access alone never permits them. Specialized Hyprland tools
+require filesystem approval, and IPC queries/actions require confirmation of the
+displayed tool and arguments. The independent MCP service still
 exposes its original tools to clients registered separately.
 
 This is an assistant tool permission, not an OS sandbox. The application still
@@ -77,6 +80,75 @@ the visible chat remains, and previously transmitted data is not recalled from
 the provider. Local file/image contents may be sent to the selected provider,
 as stated in the approval dialog.
 
+### Local environment memory
+
+After the startup filesystem consent, LYRA creates or refreshes `environment.json`
+without executing commands. It reads the standard `os-release` fields, the kernel
+release, a small allowlist of environment variables, and executable presence in
+`PATH`. It records OS/distribution/version, architecture, username/home/shell,
+graphical session, and available package managers and desktop tools. It does not
+scan personal files, read credentials, or collect an environment-variable dump.
+
+The profile uses an atomic write with mode `0600` in a `0700` state directory.
+`first_seen` survives refreshes; `observed_at` records the latest observation.
+Settings displays the stored JSON and offers an explicit refresh. Approved
+sessions inject this profile as observed data into SYSTEM for all providers;
+revocation removes it from future context. Values are never treated as instructions.
+The consent dialog states that profile data can be sent to the selected provider.
+Executable presence does not imply a running service or a known software version.
+
+### Online verification
+
+The shared SYSTEM rules instruct LYRA to verify unfamiliar, uncertain, or changing
+technical information before answering or proposing actions. Custom SYSTEM roles
+cannot remove these rules. Prefer official docs, upstream repositories, and release
+notes; compare their version with the local system. Unknown local versions require
+a confirmed diagnostic command rather than an assumption.
+
+All subscriptions share two local tools, independent of provider-native browsing:
+
+| Tool | Purpose |
+| --- | --- |
+| `lyra_web_search` | Search DuckDuckGo’s public HTML interface, returning up to six actual result titles/URLs |
+| `lyra_web_fetch` | Read a public HTTPS page, returning its final URL, retrieval time, bounded text and actual navigation links |
+
+Web requests use a dedicated HTTPS client with time/size limits. Only port 443
+is accepted. Credentials in URLs, local/private IPs, and non-public DNS targets
+are rejected. Resolved addresses are pinned for each request, and every redirect
+is checked again. Scripts are not executed. Page contents are untrusted evidence,
+not instructions. Search queries must exclude usernames, personal paths, secrets,
+and local file contents. Web requests do not automatically attach the local
+profile or credentials.
+
+A search CAPTCHA, HTTP error, or empty result is reported as a failed verification.
+LYRA may fetch a known official site directly and follow its actual links; it must
+not invent results or say that a failed request verified anything. Source links
+are included in the chat response. These are model instructions; the native tool
+gateway enforces network limits and command approval independently of the model.
+
+### Command confirmation
+
+After filesystem approval, `lyra_run_command` accepts an exact shell script and
+a reason. A native modal displays both and waits for **Run** or **Decline**.
+Escape, closing, losing the target window, or an invalid/stale response denies
+execution. Confirmation IDs are single-use. A refusal stops the current tool
+round, defers remaining tool calls, and waits for another user message.
+
+Approved shell commands run through `/bin/sh -c` in `~/.config`, with the user's
+normal account permissions (including outside that directory). The modal explains
+this boundary. There is no interactive stdin or terminal. Common credential
+environment variables and shell startup hooks are removed. Output is drained
+without blocking but retained only up to 32 KiB per stream; commands time out
+after 60 seconds, and their process group is stopped. A timeout may leave partial
+changes and never counts as success. Every later command needs a fresh approval.
+
+Hyprland IPC queries/actions and screenshots use the same modal with their exact
+tool name and JSON arguments. Managed file operations (configuration scans,
+backups, local text tools) and the static event buffer do not execute external
+commands. Restore confirms the restore/reload pair before running it.
+Provider client startup, authentication checks, and user-invoked UI helpers are
+application plumbing; provider-native shell tools remain disabled.
+
 ### SYSTEM context
 
 Open **Settings → SYSTEM context** to define the assistant’s role and instructions.
@@ -85,7 +157,8 @@ The text is shared by all three providers and saved as `system_context` in
 
 An empty value uses LYRA’s default role in the selected interface language.
 A custom value replaces that role. LYRA still appends the Hyprland/Wayland
-scope, the visual-choice protocol, and the MCP service instructions. The editor accepts up to 16,000 characters.
+scope, verification/command rules, environment context, the visual-choice protocol,
+and the MCP service instructions. The editor accepts up to 16,000 characters.
 
 The context is sent as actual system instructions: a system message for Zcode,
 `--system-prompt` for Claude Code, and `baseInstructions` for Codex app-server.
@@ -181,6 +254,8 @@ and `grim`. Its port check may report “occupied” when the service is already
 hyprpanel-chat check-providers
 hyprpanel-chat check-providers --live
 hyprpanel-chat check-providers --scope
+hyprpanel-chat check-providers --policy
+hyprpanel-chat check-web
 ```
 
 The first command checks the Coding Plan key and the official clients’ local
@@ -188,6 +263,10 @@ login state. The live test makes real subscription requests, verifies that text
 fragments arrive before the final answer, checks a SYSTEM-context marker, and
 validates two clickable choices. `--scope` makes real model requests to check
 that a recipe request is redirected while a Wayland question is answered.
+`--policy` makes real subscription requests to verify that uncertainty produces
+a web-tool request and that an exact command is proposed through LYRA’s tool.
+It never executes the requested tools. `check-web` reads the official wiki
+directly to diagnose HTTPS, DNS, and text extraction.
 These diagnostics do not modify Hyprland.
 
 ## Use MCP from another client

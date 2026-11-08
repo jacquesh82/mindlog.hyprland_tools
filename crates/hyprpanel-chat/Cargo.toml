@@ -14,9 +14,10 @@ path = "src/main.rs"
 hyprpanel-core = { path = "../hyprpanel-core" }
 rmcp = { version = "3", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 slint = "1.18"
-# Le transport LLM (HTTPS, SSE) est porté par langchain-rust ; le reqwest de
-# rmcp reste sans TLS, réservé au MCP local.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util", "process"] }
+# Le transport LLM reste distinct du client HTTPS des outils de recherche.
+reqwest = "0.11"
+libc = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util", "process", "net"] }
 tempfile = "3"
 serde.workspace = true
 serde_json.workspace = true
