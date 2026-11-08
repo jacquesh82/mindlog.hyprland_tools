@@ -83,15 +83,31 @@ fn main() -> anyhow::Result<()> {
         let files_for_send = pending_files.clone();
         let weak_send = app.as_weak();
         app.on_send(move |text| {
+            let Some(app) = weak_send.upgrade() else { return };
+            if app.get_busy() {
+                return;
+            }
             let files: Vec<_> = std::mem::take(&mut *files_for_send.lock().expect("pièces empoisonnées"));
             if text.trim().is_empty() && files.is_empty() {
                 return;
             }
+            app.set_busy(true);
             ui::attachments_clear(&weak_send);
-            let _ = tx_send.send(agent::UserEvent::Input { text: text.trim().to_string(), files });
+            if let Err(error) = tx_send.send(agent::UserEvent::Input { text: text.trim().to_string(), files }) {
+                app.set_busy(false);
+                ui::append(&weak_send, "error", format!("{} : {error}", app.get_tr().label_error));
+            }
         });
 
+        let weak_reset = app.as_weak();
+        let files_for_reset = pending_files.clone();
         app.on_new_conversation(move || {
+            files_for_reset.lock().expect("pièces empoisonnées").clear();
+            ui::attachments_clear(&weak_reset);
+            if let Some(app) = weak_reset.upgrade() {
+                app.set_draft("".into());
+                app.invoke_focus_composer();
+            }
             let _ = tx_reset.send(agent::UserEvent::Reset);
         });
 
@@ -115,6 +131,7 @@ fn main() -> anyhow::Result<()> {
                 app.set_cfg_base_url(cfg.base_url.clone().into());
                 app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
                 app.set_cfg_api_key(cfg.api_key.clone().into());
+                app.set_settings_error("".into());
                 app.set_overlay("settings".into());
             });
         });
@@ -124,13 +141,16 @@ fn main() -> anyhow::Result<()> {
             let Some(app) = weak_save.upgrade() else { return };
             let mut cfg = cfg_for_settings.lock().expect("cfg empoisonnée").clone();
             cfg.language = if app.get_cfg_lang_index() == 1 { "en".into() } else { "fr".into() };
-            cfg.model = app.get_cfg_model().to_string();
-            cfg.base_url = app.get_cfg_base_url().to_string();
+            cfg.model = app.get_cfg_model().trim().to_string();
+            cfg.base_url = app.get_cfg_base_url().trim().to_string();
+            if cfg.model.is_empty() || cfg.base_url.is_empty() {
+                app.set_settings_error(app.get_tr().settings_invalid.clone());
+                return;
+            }
             cfg.max_tokens = match app.get_cfg_max_tokens().trim().parse::<u32>() {
                 Ok(n) if n >= 256 && n <= 200_000 => n,
                 _ => {
-                    app.set_status(app.get_tr().settings_invalid.clone());
-                    app.set_overlay("none".into());
+                    app.set_settings_error(app.get_tr().settings_invalid.clone());
                     return;
                 }
             };
@@ -143,11 +163,13 @@ fn main() -> anyhow::Result<()> {
             match cfg.save() {
                 Ok(()) => {
                     *cfg_for_settings.lock().expect("cfg empoisonnée") = cfg.clone();
+                    app.set_model_label(cfg.model.clone().into());
                     let _ = tx_cfg.send(agent::UserEvent::ConfigUpdated(Box::new(cfg)));
                     app.set_overlay("none".into());
+                    app.invoke_focus_composer();
                 }
                 Err(e) => {
-                    app.set_status(format!("config : {e}").into());
+                    app.set_settings_error(format!("config : {e}").into());
                 }
             }
         });
@@ -156,6 +178,7 @@ fn main() -> anyhow::Result<()> {
         app.on_close_overlay(move || {
             if let Some(app) = weak_close.upgrade() {
                 app.set_overlay("none".into());
+                app.invoke_focus_composer();
             }
         });
 
@@ -192,11 +215,13 @@ fn main() -> anyhow::Result<()> {
         });
 
         let files_for_remove = pending_files.clone();
+        let weak_remove = app.as_weak();
         app.on_remove_attachment(move |idx| {
             let idx = idx as usize;
             let mut guard = files_for_remove.lock().expect("pièces empoisonnées");
             if idx < guard.len() {
                 guard.remove(idx);
+                ui::attachment_remove(&weak_remove, idx);
             }
         });
     }

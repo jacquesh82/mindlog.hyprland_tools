@@ -1,0 +1,161 @@
+import { Button } from "std-widgets.slint";
+
+export global Theme {
+    out property <color> canvas: #101319;
+    out property <color> panel: #181D26;
+    out property <color> raised: #222A35;
+    out property <color> border: #2A323F;
+    out property <color> text: #EDF1F7;
+    out property <color> secondary: #ADB8C8;
+    out property <color> muted: #8A97AA;
+    out property <color> accent: #7BDACD;
+}
+
+export component Avatar inherits Image {
+    source: @image-url("../assets/lyra-avatar.png");
+    image-fit: contain;
+    accessible-role: none;
+}
+
+// Les boutons standard conservent navigation clavier, focus et sémantique.
+// Le contenu visuel est redessiné sans ajouter de gestionnaire d'entrée.
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <string> a11y-label;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    callback clicked();
+    in property <bool> icon-only: false;
+    in property <bool> filled: false;
+    height: 38px;
+    min-width: root.icon-only ? 38px : content.min-width;
+    preferred-width: root.icon-only ? 38px : content.preferred-width;
+    max-width: self.preferred-width;
+    horizontal-stretch: 0;
+    forward-focus: control;
+    Rectangle {
+        border-radius: 8px;
+        background: !root.enabled ? Theme.panel : control.pressed ? #304B50 : root.primary ? (hover.has-hover ? #9AE7DC : Theme.accent) : hover.has-hover ? #29343F : root.filled ? Theme.raised : Theme.canvas;
+        border-width: 1px;
+        border-color: control.has-focus ? Theme.accent : root.filled ? Theme.border : transparent;
+        content := HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            spacing: 7px;
+            alignment: center;
+            if root.icon.width > 0: Image {
+                width: 16px;
+                height: 16px;
+                y: (parent.height - self.height) / 2;
+                source: root.icon;
+                colorize: !root.enabled ? Theme.muted : root.primary ? #102C2A : Theme.secondary;
+            }
+            if !root.icon-only: Text {
+                text: root.text;
+                color: !root.enabled ? Theme.muted : root.primary ? #102C2A : Theme.text;
+                font-size: 13px;
+                font-weight: 500;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+        }
+    }
+    hover := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        control := Button {
+            width: parent.width; height: parent.height;
+            opacity: 0;
+            text: root.text;
+            accessible-label: root.a11y-label == "" ? root.text : root.a11y-label;
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+    }
+    if root.icon-only: Tooltip {
+        Text { text: root.text; color: Theme.text; font-size: 13px; }
+    }
+}
+
+export component SuggestionCard inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <image> icon;
+    in property <bool> enabled: true;
+    callback clicked();
+    forward-focus: control;
+    horizontal-stretch: 1;
+    min-width: 0px;
+    preferred-width: 0px;
+    height: 104px;
+    Rectangle {
+        border-radius: 12px;
+        background: control.pressed ? #24383D : hover.has-hover ? #202B35 : Theme.panel;
+        border-width: 1px;
+        border-color: control.has-focus || hover.has-hover ? Theme.accent : Theme.border;
+        HorizontalLayout {
+            padding: 16px;
+            spacing: 12px;
+            Image {
+                width: 21px;
+                height: 21px;
+                source: root.icon;
+                colorize: Theme.accent;
+            }
+            VerticalLayout {
+                alignment: start;
+                spacing: 6px;
+                Text {
+                    text: root.title;
+                    color: Theme.text;
+                    font-size: 15px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+                Text {
+                    text: root.description;
+                    color: Theme.secondary;
+                    font-size: 13px;
+                    wrap: word-wrap;
+                    accessible-role: none;
+                }
+            }
+        }
+    }
+    hover := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        control := Button {
+            width: parent.width; height: parent.height;
+            opacity: 0;
+            text: root.title + ". " + root.description;
+            enabled: root.enabled;
+            clicked => { root.clicked(); }
+        }
+    }
+}
+
+export component PanelHeader inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> close-label;
+    callback close();
+    spacing: 12px;
+    Avatar { width: 34px; height: 34px; }
+    Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: 18px;
+        font-weight: 600;
+        horizontal-stretch: 1;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+    ActionButton {
+        text: root.close-label;
+        icon: @image-url("../assets/icons/close.svg");
+        icon-only: true;
+        clicked => { root.close(); }
+    }
+}

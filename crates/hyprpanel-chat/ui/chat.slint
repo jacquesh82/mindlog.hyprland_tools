@@ -1,4 +1,5 @@
-import { Button, LineEdit, ComboBox, TextEdit } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, TextEdit, Palette } from "std-widgets.slint";
+import { Theme, Avatar, ActionButton, SuggestionCard, PanelHeader } from "components.slint";
 
 // ─── Structures de données ────────────────────────────────────────────────
 
@@ -29,6 +30,8 @@ export struct TrTexts {
     status-starting: string, status-thinking: string, placeholder: string, attach: string,
     tip-help: string, tip-settings: string, tip-history: string,
     welcome-title: string, welcome-l1: string, welcome-l2: string, welcome-l3: string,
+    header-subtitle: string, composer-hint: string,
+    card-displays: string, card-appearance: string, card-shortcuts: string, card-capture: string,
     welcome-examples: string, ex1: string, ex2: string, ex3: string, ex4: string,
     help-title: string, help-body: string,
     about-title: string, about-body: string,
@@ -43,107 +46,24 @@ export struct TrTexts {
     new-conversation: string, mcp-unavailable: string, mcp-tools: string,
 }
 
-// ─── Petits composants réutilisables ─────────────────────────────────────
-
-// Titre de panneau overlay : wordmark + intitulé + bouton fermer.
-component PanelHeader inherits HorizontalLayout {
-    in property <string> title;
-    callback close();
-    HorizontalLayout {
-        alignment: center;
-        spacing: 10px;
-        Text {
-            text: "LY";
-            color: #22D3EE;
-            font-weight: 800;
-            font-size: 16px;
-            letter-spacing: 2px;
-            vertical-alignment: center;
-        }
-        Text {
-            text: "RA";
-            color: #D946EF;
-            font-weight: 800;
-            font-size: 16px;
-            letter-spacing: 2px;
-            vertical-alignment: center;
-        }
-        Text {
-            text: " · " + title;
-            color: #E5E7EB;
-            font-size: 15px;
-            font-weight: 600;
-            vertical-alignment: center;
-            horizontal-stretch: 1;
-        }
-        Button { text: "×"; clicked => { close(); } }
-    }
-}
-
-// Bouton-glyphe du header, avec tooltip natif.
-component GlyphButton inherits Rectangle {
-    in property <string> glyph;
-    in property <string> tip;
-    in property <bool> enabled: true;
-    callback clicked();
-    height: 28px;
-    width: 30px;
-    border-radius: 6px;
-    background: gb.has-hover && gb.enabled ? #1E293B : transparent;
-    gb := TouchArea {
-        enabled: root.enabled;
-        clicked => { root.clicked(); }
-    }
-    Text {
-        text: glyph;
-        color: root.enabled ? #7DD3FC : #475569;
-        font-size: 15px;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    if root.tip != "": Tooltip {
-        Text { text: root.tip; color: #E2E8F0; font-size: 12px; }
-    }
-}
-
-// Chip d'exemple cliquable de l'écran d'accueil.
-component ExampleChip inherits Rectangle {
-    in property <string> label;
-    callback invoked();
-    height: ech.preferred-height + 16px;
-    min-width: 200px;
-    border-radius: 10px;
-    background: ec.has-hover ? #1E2A47 : #141B2D;
-    border-width: 1px;
-    border-color: ec.has-hover ? #22D3EE : #274060;
-    drop-shadow-blur: 4px;
-    drop-shadow-color: #00000066;
-    ec := TouchArea { clicked => { invoked(); } }
-    ech := Text {
-        x: 10px; y: 8px;
-        width: parent.width - 20px;
-        text: label;
-        color: #E2E8F0;
-        font-size: 12px;
-        wrap: word-wrap;
-    }
-}
-
-// ─── Fenêtre principale ──────────────────────────────────────────────────
 
 export component ChatWindow inherits Window {
     title: "LYRA — configuration Wayland";
-    background: #0B0F1A;
-    preferred-width: 560px;
-    preferred-height: 720px;
-    min-width: 420px;
-    min-height: 520px;
+    background: Theme.canvas;
+    default-font-family: "sans-serif";
+    default-font-size: 14px;
+    preferred-width: 1080px;
+    preferred-height: 800px;
+    min-width: 480px;
+    min-height: 600px;
+    init => { Palette.color-scheme = ColorScheme.dark; }
 
     // état i18n + UI
     in-out property <TrTexts> tr;
     in-out property <string> status: "…";
     in-out property <string> model-label: "";
     in-out property <bool> busy: false;
+    in-out property <string> draft;
     in-out property <[MessageRow]> messages;
     in-out property <[AttachmentRow]> attachments;
 
@@ -156,6 +76,7 @@ export component ChatWindow inherits Window {
     in-out property <string> cfg-base-url: "";
     in-out property <string> cfg-max-tokens: "";
     in-out property <string> cfg-api-key: "";
+    in-out property <string> settings-error;
     in-out property <bool> clients-claude-ok: false;
     in-out property <bool> clients-zcode-ok: false;
     in-out property <string> clients-claude-cmd: "";
@@ -173,342 +94,332 @@ export component ChatWindow inherits Window {
     callback save-settings();
     callback restore-requested(string);
 
+    // La mesure intrinsèque ne dépend pas des décisions responsives.
+    private property <length> view-width: 1080px;
+    changed width => { root.view-width = root.width; }
+
+    private property <length> column-width: min(root.view-width - 48px, 800px);
+    private property <bool> interactive: !root.busy && root.overlay == "none";
+
     public function scroll-bottom() {
-        flick.content-y = Math.max(0px, flick.content-height - flick.height);
+        if root.messages.length > 0 {
+            flick.content-y = Math.max(0px, flick.content-height - flick.height);
+        }
     }
 
-    VerticalLayout {
-        // ── En-tête : wordmark + pill + boutons ──────────────────────────
-        Rectangle {
-            height: 44px;
-            background: #111827;
-            HorizontalLayout {
-                padding-left: 14px;
-                padding-right: 8px;
-                spacing: 8px;
-                alignment: center;
+    public function focus-composer() { le.focus(); }
+
+    Rectangle {
+        min-width: 0px;
+        max-width: 16384px;
+        preferred-width: 1080px;
+        height: root.height;
+        VerticalLayout {
+            width: parent.width;
+            height: parent.height;
+            spacing: 0px;
+            // Identité ancrée à gauche, actions à droite, sans compression du titre.
+            Rectangle {
+                height: 80px;
+                background: Theme.canvas;
+                Rectangle { y: parent.height - 1px; height: 1px; background: Theme.border; }
                 HorizontalLayout {
-                    alignment: start;
-                    Text {
-                        text: "LY";
-                        color: #22D3EE;
-                        font-weight: 800;
-                        font-size: 18px;
-                        letter-spacing: 3px;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: "RA";
-                        color: #D946EF;
-                        font-weight: 800;
-                        font-size: 18px;
-                        letter-spacing: 3px;
-                        vertical-alignment: center;
-                    }
-                    Rectangle {
-                        border-radius: 999px;
-                        border-width: 1px;
-                        border-color: #155E75;
-                        background: #0B0F1A;
-                        drop-shadow-blur: 8px;
-                        drop-shadow-color: #22D3EE66;
-                        height: 22px;
-                        Text {
-                            text: "WAYLAND CONFIGURATION ASSISTANT";
-                            color: #7DD3FC;
-                            font-size: 9px;
-                            font-weight: 500;
-                            letter-spacing: 2px;
-                            vertical-alignment: center;
-                            horizontal-alignment: center;
+                    padding-left: root.view-width < 650px ? 16px : 28px;
+                    padding-right: root.view-width < 650px ? 16px : 28px;
+                    padding-top: 18px;
+                    padding-bottom: 18px;
+                    spacing: 12px;
+                    Avatar { width: 42px; height: 42px; }
+                    VerticalLayout {
+                        spacing: 3px;
+                        alignment: center;
+                        Text { text: "LYRA"; color: Theme.text; font-size: 19px; font-weight: 700; }
+                        if root.view-width > 680px: Text {
+                            text: root.tr.header-subtitle;
+                            color: Theme.muted;
+                            font-size: 12px;
                         }
                     }
-                }
-                Text {
-                    text: root.busy ? root.status + "  ●" : root.status;
-                    color: #A8B3C5;
-                    font-size: 12px;
-                    vertical-alignment: center;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                }
-                GlyphButton {
-                    glyph: "⟲";
-                    tip: root.tr.tip-history;
-                    enabled: !root.busy;
-                    clicked => { root.overlay = "history"; }
-                }
-                GlyphButton {
-                    glyph: "⚙";
-                    tip: root.tr.tip-settings;
-                    enabled: !root.busy;
-                    clicked => { root.open-settings(); }
-                }
-                GlyphButton {
-                    glyph: "?";
-                    tip: root.tr.tip-help;
-                    clicked => { root.overlay = "help"; }
-                }
-                Button {
-                    text: root.tr.new-chat;
-                    enabled: !root.busy;
-                    clicked => { root.new-conversation(); }
+                    Rectangle { horizontal-stretch: 1; }
+                    ActionButton {
+                        icon: @image-url("../assets/icons/history.svg");
+                        text: root.tr.tip-history;
+                        icon-only: true;
+                        enabled: root.interactive;
+                        clicked => { root.overlay = "history"; }
+                    }
+                    ActionButton {
+                        icon: @image-url("../assets/icons/settings.svg");
+                        text: root.tr.tip-settings;
+                        icon-only: true;
+                        enabled: root.interactive;
+                        clicked => { root.open-settings(); }
+                    }
+                    ActionButton {
+                        icon: @image-url("../assets/icons/help.svg");
+                        text: root.tr.tip-help;
+                        icon-only: true;
+                        enabled: root.overlay == "none";
+                        clicked => { root.overlay = "help"; }
+                    }
+                    Rectangle { width: 1px; background: Theme.border; }
+                    ActionButton {
+                        text: root.tr.new-chat;
+                        icon: @image-url("../assets/icons/plus.svg");
+                        icon-only: root.view-width < 650px;
+                        filled: true;
+                        enabled: root.interactive;
+                        clicked => { root.new-conversation(); }
+                    }
                 }
             }
-        }
 
-        // ── Journal des messages ─────────────────────────────────────────
-        flick := Flickable {
-            vertical-stretch: 1;
-            content-height: log.preferred-height;
-            VerticalLayout {
-                padding: 12px;
-                spacing: 8px;
+            // Une colonne de lecture stable, même lorsque la fenêtre est maximisée.
+            flick := Flickable {
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+                min-width: 0px;
+                max-width: 16384px;
+                min-height: 0px;
+                max-height: 16384px;
+                content-width: self.width;
+                content-height: max(self.height, log.preferred-height + 56px);
                 log := VerticalLayout {
-                    spacing: 8px;
+                    x: (flick.width - self.width) / 2;
+                    y: root.messages.length == 0 ? max(28px, (flick.height - self.preferred-height) / 2) : 28px;
+                    width: root.column-width;
+                    height: self.preferred-height;
+                    spacing: 18px;
 
-                    // Écran d'accueil quand la conversation est vide.
                     if root.messages.length == 0: VerticalLayout {
-                        spacing: 12px;
-                        alignment: start;
+                        spacing: 0px;
                         HorizontalLayout {
                             alignment: center;
-                            Text {
-                                text: root.tr.welcome-title;
-                                color: #E5E7EB;
-                                font-size: 20px;
-                                font-weight: 700;
+                            Avatar { width: root.view-width < 650px ? 72px : 100px; height: self.width; }
+                        }
+                        Rectangle { height: root.view-width < 650px ? 16px : 20px; }
+                        Text {
+                            text: root.tr.welcome-title;
+                            color: Theme.text;
+                            font-size: root.view-width < 650px ? 27px : 34px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        Rectangle { height: root.view-width < 650px ? 8px : 12px; }
+                        Text {
+                            text: root.tr.welcome-l1;
+                            color: Theme.secondary;
+                            font-size: 15px;
+                            wrap: word-wrap;
+                            horizontal-alignment: center;
+                        }
+                        Rectangle { height: root.view-width < 650px ? 20px : 28px; }
+                        Text {
+                            text: root.tr.welcome-examples;
+                            color: Theme.muted;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                        }
+                        Rectangle { height: root.view-width < 650px ? 10px : 14px; }
+                        GridLayout {
+                            spacing: 12px;
+                            Row {
+                                SuggestionCard {
+                                    title: root.tr.card-displays;
+                                    description: root.tr.ex1;
+                                    icon: @image-url("../assets/icons/monitor.svg");
+                                    enabled: root.interactive;
+                                    clicked => { le.text = root.tr.ex1; le.focus(); }
+                                }
+                                SuggestionCard {
+                                    title: root.tr.card-appearance;
+                                    description: root.tr.ex2;
+                                    icon: @image-url("../assets/icons/sliders.svg");
+                                    enabled: root.interactive;
+                                    clicked => { le.text = root.tr.ex2; le.focus(); }
+                                }
+                            }
+                            Row {
+                                SuggestionCard {
+                                    title: root.tr.card-shortcuts;
+                                    description: root.tr.ex3;
+                                    icon: @image-url("../assets/icons/keyboard.svg");
+                                    enabled: root.interactive;
+                                    clicked => { le.text = root.tr.ex3; le.focus(); }
+                                }
+                                SuggestionCard {
+                                    title: root.tr.card-capture;
+                                    description: root.tr.ex4;
+                                    icon: @image-url("../assets/icons/capture.svg");
+                                    enabled: root.interactive;
+                                    clicked => { le.text = root.tr.ex4; le.focus(); }
+                                }
                             }
                         }
-                        for line[i] in [root.tr.welcome-l1, root.tr.welcome-l2, root.tr.welcome-l3]: HorizontalLayout {
-                            alignment: center;
-                            Text {
-                                width: root.width - 48px;
-                                text: line;
-                                color: #C3CDDE;
-                                font-size: 13px;
-                                wrap: word-wrap;
-                                horizontal-alignment: center;
-                            }
-                        }
+                        Rectangle { height: root.view-width < 650px ? 16px : 22px; }
                         HorizontalLayout {
                             alignment: center;
+                            spacing: 7px;
+                            Image {
+                                width: 14px; height: 14px;
+                                source: @image-url("../assets/icons/shield.svg");
+                                colorize: Theme.muted;
+                            }
                             Text {
-                                text: root.tr.welcome-examples;
-                                color: #7DD3FC;
+                                text: root.tr.welcome-l2;
+                                color: Theme.muted;
                                 font-size: 12px;
-                                letter-spacing: 1px;
+                                wrap: word-wrap;
                             }
-                        }
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 8px;
-                            ExampleChip { label: root.tr.ex1; invoked => { root.send(root.tr.ex1); } }
-                        }
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 8px;
-                            ExampleChip { label: root.tr.ex2; invoked => { root.send(root.tr.ex2); } }
-                        }
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 8px;
-                            ExampleChip { label: root.tr.ex3; invoked => { root.send(root.tr.ex3); } }
-                        }
-                        HorizontalLayout {
-                            alignment: center;
-                            spacing: 8px;
-                            ExampleChip { label: root.tr.ex4; invoked => { root.send(root.tr.ex4); } }
                         }
                     }
 
                     for row in root.messages: Rectangle {
-                        if row.kind == "status": HorizontalLayout {
-                            alignment: center;
-                            padding: 4px;
-                            Text {
-                                text: row.text;
-                                color: #64748B;
-                                font-size: 11px;
-                            }
-                        }
-                        if row.kind == "user": HorizontalLayout {
-                            alignment: end;
+                        height: message.preferred-height;
+                        message := HorizontalLayout {
+                            width: parent.width;
+                            height: parent.height;
+                            spacing: 12px;
+                            if row.kind == "user": Rectangle { horizontal-stretch: 1; }
+                            if row.kind == "assistant": Avatar { width: 32px; height: 32px; }
                             Rectangle {
-                                width: min(root.width - 48px, utxt.preferred-width + 26px);
-                                height: utxt.preferred-height + 14px;
-                                border-radius: 12px;
-                                background: @linear-gradient(135deg, #8B5CF6, #EC4899);
-                                utxt := Text {
-                                    x: 13px;
-                                    y: 7px;
-                                    width: parent.width - 26px;
-                                    text: row.text;
-                                    color: #FFFFFF;
-                                    font-size: 13px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                        if row.kind == "assistant": HorizontalLayout {
-                            alignment: start;
-                            Rectangle {
-                                width: min(root.width - 48px, atxt.preferred-width + 26px);
-                                height: atxt.preferred-height + 14px;
-                                border-radius: 12px;
-                                background: #1A2238;
-                                border-width: 1px;
-                                border-color: #233049;
-                                atxt := Text {
-                                    x: 13px;
-                                    y: 7px;
-                                    width: parent.width - 26px;
-                                    text: row.text;
-                                    color: #E5E7EB;
-                                    font-size: 13px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
-                        if row.kind == "tool": HorizontalLayout {
-                            alignment: start;
-                            Rectangle {
-                                width: root.width - 48px;
-                                border-radius: 8px;
-                                background: #0F1524;
-                                border-width: 1px;
-                                border-color: #1E293B;
-                                height: tcol.preferred-height + 14px;
-                                tcol := VerticalLayout {
-                                    x: 12px;
-                                    y: 7px;
-                                    width: parent.width - 24px;
-                                    spacing: 2px;
-                                    Text {
-                                        text: root.tr.label-tool;
-                                        color: #22D3EE;
-                                        font-size: 10px;
-                                        font-weight: 700;
-                                        letter-spacing: 1px;
+                                horizontal-stretch: row.kind == "user" ? 0 : 1;
+                                width: row.kind == "user" ? min(root.column-width * 0.85, body.preferred-width + 36px) : root.column-width - 44px;
+                                height: body.preferred-height + 28px;
+                                border-radius: 14px;
+                                background: row.kind == "user" ? #1C323B : row.kind == "error" ? #291C25 : row.kind == "status" ? transparent : Theme.panel;
+                                border-width: row.kind == "status" ? 0px : 1px;
+                                border-color: row.kind == "error" ? #67404E : row.kind == "user" ? #2B4C55 : Theme.border;
+                                body := VerticalLayout {
+                                    x: 18px; y: 14px;
+                                    width: parent.width - 36px;
+                                    height: self.preferred-height;
+                                    spacing: 7px;
+                                    if row.kind != "status": Text {
+                                        text: row.kind == "user" ? root.tr.label-you : row.kind == "assistant" ? "LYRA" : row.kind == "tool" ? root.tr.label-tool : root.tr.label-error;
+                                        color: row.kind == "error" ? #F3A9B7 : row.kind == "assistant" ? Theme.accent : Theme.secondary;
+                                        font-size: 12px;
+                                        font-weight: 600;
                                     }
                                     Text {
                                         text: row.text;
-                                        color: #9CA3AF;
-                                        font-size: 11px;
-                                        font-family: "monospace";
+                                        color: row.kind == "error" ? #F3C6D0 : row.kind == "tool" || row.kind == "status" ? Theme.secondary : Theme.text;
+                                        font-size: row.kind == "tool" || row.kind == "status" ? 12px : 14px;
+                                        font-family: row.kind == "tool" ? "monospace" : root.default-font-family;
                                         wrap: word-wrap;
                                     }
                                 }
                             }
                         }
-                        if row.kind == "error": HorizontalLayout {
-                            alignment: start;
-                            Rectangle {
-                                width: root.width - 48px;
-                                border-radius: 8px;
-                                background: #2D1220;
-                                border-width: 1px;
-                                border-color: #831843;
-                                height: etxt.preferred-height + 14px;
-                                etxt := Text {
-                                    x: 12px;
-                                    y: 7px;
-                                    width: parent.width - 24px;
-                                    text: row.text;
-                                    color: #FDA4AF;
-                                    font-size: 12px;
-                                    wrap: word-wrap;
-                                }
-                            }
-                        }
                     }
                 }
             }
-        }
 
-        // ── Pièces jointes en attente ────────────────────────────────────
-        if root.attachments.length > 0: Rectangle {
-            background: #0D1322;
-            height: chips.preferred-height + 8px;
-            HorizontalLayout {
-                padding: 4px;
-                chips := HorizontalLayout {
-                    spacing: 6px;
-                    for a[i] in root.attachments: Rectangle {
-                        border-radius: 999px;
-                        background: #16233D;
-                        border-width: 1px;
-                        border-color: #274060;
-                        height: 24px;
-                        HorizontalLayout {
-                            padding-left: 10px;
-                            padding-right: 2px;
-                            spacing: 6px;
-                            alignment: center;
-                            Text {
-                                text: a.name + "  " + a.meta;
-                                color: #CBD5E1;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-                            Rectangle {
-                                width: 20px;
-                                border-radius: 999px;
-                                background: rm.has-hover ? #3B1526 : #1E3A5F;
-                                rm := TouchArea {
+            // Compositeur : champ large, pièces jointes et action principale visibles.
+            Rectangle {
+                height: root.attachments.length > 0 ? 188px : 146px;
+                Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 0px;
+                    width: root.column-width;
+                    height: root.attachments.length > 0 ? 146px : 104px;
+                    border-radius: 16px;
+                    background: Theme.panel;
+                    border-width: 1px;
+                    border-color: le.has-focus ? Theme.accent : Theme.border;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        if root.attachments.length > 0: Flickable {
+                            height: 34px;
+                            content-width: chips.preferred-width;
+                            content-height: self.height;
+                            chips := HorizontalLayout {
+                                height: 32px;
+                                spacing: 8px;
+                                for a[i] in root.attachments: ActionButton {
+                                    text: a.name + "  ×";
+                                    a11y-label: root.tr.close + " " + a.name;
+                                    filled: true;
+                                    height: 32px;
+                                    enabled: root.interactive;
                                     clicked => { root.remove-attachment(i); }
                                 }
-                                Text {
-                                    text: "×";
-                                    color: #E2E8F0;
-                                    font-size: 13px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
+                            }
+                        }
+                        le := LineEdit {
+                            text <=> root.draft;
+                            height: 36px;
+                            placeholder-text: root.tr.placeholder;
+                            accessible-label: root.tr.placeholder;
+                            enabled: root.interactive;
+                            accepted(t) => {
+                                if t != "" || root.attachments.length > 0 {
+                                    root.send(t);
+                                    le.text = "";
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            ActionButton {
+                                text: root.tr.attach;
+                                icon: @image-url("../assets/icons/paperclip.svg");
+                                height: 32px;
+                                enabled: root.interactive;
+                                clicked => { root.attach-clicked(); }
+                            }
+                            Text {
+                                text: root.model-label;
+                                color: Theme.muted;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                overflow: elide;
+                            }
+                            ActionButton {
+                                text: root.tr.send;
+                                icon: @image-url("../assets/icons/arrow-up.svg");
+                                primary: true;
+                                height: 32px;
+                                enabled: root.interactive && (le.text != "" || root.attachments.length > 0);
+                                clicked => {
+                                    root.send(le.text);
+                                    le.text = "";
                                 }
                             }
                         }
                     }
                 }
+                HorizontalLayout {
+                    x: (parent.width - self.width) / 2;
+                    y: parent.height - 30px;
+                    width: root.column-width;
+                    height: 18px;
+                    spacing: 8px;
+                    Rectangle {
+                        width: 6px; height: 6px; y: 6px;
+                        border-radius: 3px;
+                        background: root.busy ? #DFB870 : Theme.muted;
+                    }
+                    Text {
+                        text: root.status;
+                        color: Theme.secondary;
+                        font-size: 11px;
+                        overflow: elide;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    if root.view-width > 600px: Text {
+                        text: root.tr.composer-hint;
+                        color: Theme.muted;
+                        font-size: 11px;
+                        vertical-alignment: center;
+                    }
+                }
             }
         }
 
-        // ── Saisie ───────────────────────────────────────────────────────
-        Rectangle {
-            background: #111827;
-            height: 52px;
-            HorizontalLayout {
-                padding: 8px;
-                spacing: 8px;
-                alignment: center;
-                Button {
-                    text: root.tr.attach;
-                    enabled: !root.busy;
-                    clicked => { root.attach-clicked(); }
-                }
-                le := LineEdit {
-                    horizontal-stretch: 1;
-                    placeholder-text: root.tr.placeholder;
-                    enabled: !root.busy && root.overlay == "none";
-                    accepted(t) => {
-                        if (t != "" || root.attachments.length > 0) {
-                            root.send(t);
-                            le.text = "";
-                        }
-                    }
-                }
-                Button {
-                    text: root.tr.send;
-                    enabled: !root.busy && (le.text != "" || root.attachments.length > 0);
-                    clicked => {
-                        if (le.text != "" || root.attachments.length > 0) {
-                            root.send(le.text);
-                            le.text = "";
-                        }
-                    }
-                }
-            }
-        }
     }
 
     // ── Overlays modaux ──────────────────────────────────────────────────
@@ -517,230 +428,253 @@ export component ChatWindow inherits Window {
         TouchArea {
             clicked => { root.close-overlay(); }
         }
-        Rectangle {
-            x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: min(root.width - 40px, 470px);
-            height: min(root.height - 60px, 560px);
-            border-radius: 14px;
-            background: #141B2D;
-            border-width: 1px;
-            border-color: #22D3EE33;
-            drop-shadow-blur: 20px;
-            drop-shadow-color: #000000AA;
-
-            VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-
-                // ── AIDE ──────────────────────────────────────────────
-                if root.overlay == "help": VerticalLayout {
-                    spacing: 8px;
-                    PanelHeader {
-                        title: root.tr.help-title;
-                        close => { root.close-overlay(); }
-                    }
-                    TextEdit {
-                        vertical-stretch: 1;
-                        read-only: true;
-                        wrap: word-wrap;
-                        text: root.tr.help-body;
-                        font-size: 12px;
-                    }
+        FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.close-overlay();
+                    return accept;
                 }
+                return reject;
+            }
+            Rectangle {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: min(root.view-width - 40px, 560px);
+                height: min(root.height - 60px, 560px);
+                border-radius: 14px;
+                background: Theme.panel;
+                border-width: 1px;
+                border-color: Theme.border;
+                drop-shadow-blur: 20px;
+                drop-shadow-color: #000000AA;
 
-                // ── À PROPOS ──────────────────────────────────────────
-                if root.overlay == "about": VerticalLayout {
-                    spacing: 8px;
-                    PanelHeader {
-                        title: root.tr.about-title;
-                        close => { root.close-overlay(); }
-                    }
-                    TextEdit {
-                        vertical-stretch: 1;
-                        read-only: true;
-                        wrap: word-wrap;
-                        text: root.tr.about-body;
-                        font-size: 12px;
-                    }
-                }
+                // Les clics dans le panneau ne traversent pas vers le fond.
+                TouchArea { }
 
-                // ── RÉGLAGES ──────────────────────────────────────────
-                if root.overlay == "settings": VerticalLayout {
-                    spacing: 8px;
-                    PanelHeader {
-                        title: root.tr.settings-title;
-                        close => { root.close-overlay(); }
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 10px;
+
+                    // ── AIDE ──────────────────────────────────────────────
+                    if root.overlay == "help": VerticalLayout {
+                        spacing: 8px;
+                        PanelHeader {
+                            close-label: root.tr.close;
+                            title: root.tr.help-title;
+                            close => { root.close-overlay(); }
+                        }
+                        TextEdit {
+                            vertical-stretch: 1;
+                            read-only: true;
+                            wrap: word-wrap;
+                            text: root.tr.help-body;
+                            font-size: 14px;
+                        }
+                        ActionButton {
+                            text: root.tr.about-title;
+                            clicked => { root.overlay = "about"; }
+                        }
                     }
-                    Flickable {
-                        vertical-stretch: 1;
-                        content-height: setform.preferred-height;
-                        VerticalLayout {
-                            padding: 2px;
-                            spacing: 8px;
-                            setform := VerticalLayout {
+
+                    // ── À PROPOS ──────────────────────────────────────────
+                    if root.overlay == "about": VerticalLayout {
+                        spacing: 8px;
+                        PanelHeader {
+                            close-label: root.tr.close;
+                            title: root.tr.about-title;
+                            close => { root.close-overlay(); }
+                        }
+                        TextEdit {
+                            vertical-stretch: 1;
+                            read-only: true;
+                            wrap: word-wrap;
+                            text: root.tr.about-body;
+                            font-size: 14px;
+                        }
+                    }
+
+                    // ── RÉGLAGES ──────────────────────────────────────────
+                    if root.overlay == "settings": VerticalLayout {
+                        spacing: 8px;
+                        PanelHeader {
+                            close-label: root.tr.close;
+                            title: root.tr.settings-title;
+                            close => { root.close-overlay(); }
+                        }
+                        if root.settings-error != "": Text {
+                            text: root.settings-error;
+                            color: #F3A9B7;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        Flickable {
+                            vertical-stretch: 1;
+                            content-height: setform.preferred-height;
+                            VerticalLayout {
+                                padding: 2px;
                                 spacing: 8px;
-                                Text {
-                                    text: root.tr.settings-language;
-                                    color: #7DD3FC;
-                                    font-size: 11px;
-                                    letter-spacing: 1px;
-                                }
-                                ComboBox {
-                                    model: ["Français", "English"];
-                                    current-index <=> root.cfg-lang-index;
-                                }
-                                Text {
-                                    text: root.tr.settings-model;
-                                    color: #7DD3FC;
-                                    font-size: 11px;
-                                    letter-spacing: 1px;
-                                }
-                                LineEdit { text: root.cfg-model; }
-                                Text {
-                                    text: root.tr.settings-endpoint;
-                                    color: #7DD3FC;
-                                    font-size: 11px;
-                                    letter-spacing: 1px;
-                                }
-                                LineEdit { text: root.cfg-base-url; }
-                                Text {
-                                    text: root.tr.settings-max-tokens;
-                                    color: #7DD3FC;
-                                    font-size: 11px;
-                                    letter-spacing: 1px;
-                                }
-                                LineEdit {
-                                    text: root.cfg-max-tokens;
-                                    input-type: InputType.number;
-                                }
-                                Text {
-                                    text: root.tr.settings-api-key;
-                                    color: #7DD3FC;
-                                    font-size: 11px;
-                                    letter-spacing: 1px;
-                                }
-                                LineEdit {
-                                    text: root.cfg-api-key;
-                                    input-type: InputType.password;
-                                }
-                                Text {
-                                    text: root.tr.settings-clients;
-                                    color: #7DD3FC;
-                                    font-size: 11px;
-                                    letter-spacing: 1px;
-                                }
-                                Text {
-                                    text: "Claude Code : " + (root.clients-claude-ok ? root.tr.settings-clients-ok : root.tr.settings-clients-missing);
-                                    color: root.clients-claude-ok ? #4ADE80 : #FDA4AF;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                                if !root.clients-claude-ok: Text {
-                                    text: root.clients-claude-cmd;
-                                    color: #64748B;
-                                    font-size: 10px;
-                                    font-family: "monospace";
-                                    wrap: word-wrap;
-                                }
-                                Text {
-                                    text: "ZCode : " + (root.clients-zcode-ok ? root.tr.settings-clients-ok : root.tr.settings-clients-missing);
-                                    color: root.clients-zcode-ok ? #4ADE80 : #FDA4AF;
-                                    font-size: 11px;
-                                    wrap: word-wrap;
-                                }
-                                if !root.clients-zcode-ok: Text {
-                                    text: root.clients-zcode-cmd;
-                                    color: #64748B;
-                                    font-size: 10px;
-                                    font-family: "monospace";
-                                    wrap: word-wrap;
+                                setform := VerticalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: root.tr.settings-language;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                    }
+                                    ComboBox {
+                                        model: ["Français", "English"];
+                                        current-index <=> root.cfg-lang-index;
+                                    }
+                                    Text {
+                                        text: root.tr.settings-model;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                    }
+                                    LineEdit { text <=> root.cfg-model; accessible-label: root.tr.settings-model; }
+                                    Text {
+                                        text: root.tr.settings-endpoint;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                    }
+                                    LineEdit { text <=> root.cfg-base-url; accessible-label: root.tr.settings-endpoint; }
+                                    Text {
+                                        text: root.tr.settings-max-tokens;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                    }
+                                    LineEdit {
+                                        text <=> root.cfg-max-tokens;
+                                        accessible-label: root.tr.settings-max-tokens;
+                                        input-type: InputType.number;
+                                    }
+                                    Text {
+                                        text: root.tr.settings-api-key;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                    }
+                                    LineEdit {
+                                        text <=> root.cfg-api-key;
+                                        accessible-label: root.tr.settings-api-key;
+                                        input-type: InputType.password;
+                                    }
+                                    Text {
+                                        text: root.tr.settings-clients;
+                                        color: Theme.secondary;
+                                        font-size: 13px;
+                                    }
+                                    Text {
+                                        text: "Claude Code : " + (root.clients-claude-ok ? root.tr.settings-clients-ok : root.tr.settings-clients-missing);
+                                        color: root.clients-claude-ok ? #4ADE80 : #FDA4AF;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
+                                    }
+                                    if !root.clients-claude-ok: Text {
+                                        text: root.clients-claude-cmd;
+                                        color: Theme.muted;
+                                        font-size: 12px;
+                                        font-family: "monospace";
+                                        wrap: word-wrap;
+                                    }
+                                    Text {
+                                        text: "ZCode : " + (root.clients-zcode-ok ? root.tr.settings-clients-ok : root.tr.settings-clients-missing);
+                                        color: root.clients-zcode-ok ? #4ADE80 : #FDA4AF;
+                                        font-size: 13px;
+                                        wrap: word-wrap;
+                                    }
+                                    if !root.clients-zcode-ok: Text {
+                                        text: root.clients-zcode-cmd;
+                                        color: Theme.muted;
+                                        font-size: 12px;
+                                        font-family: "monospace";
+                                        wrap: word-wrap;
+                                    }
                                 }
                             }
                         }
-                    }
-                    HorizontalLayout {
-                        alignment: end;
-                        spacing: 8px;
-                        Button {
-                            text: root.tr.cancel;
-                            clicked => { root.close-overlay(); }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 8px;
+                            ActionButton {
+                                text: root.tr.cancel;
+                                clicked => { root.close-overlay(); }
+                            }
+                            ActionButton {
+                                text: root.tr.save;
+                                primary: true;
+                                clicked => { root.save-settings(); }
+                            }
                         }
-                        Button {
-                            text: root.tr.save;
-                            primary: true;
-                            clicked => { root.save-settings(); }
-                        }
                     }
-                }
 
-                // ── HISTORIQUE ────────────────────────────────────────
-                if root.overlay == "history": VerticalLayout {
-                    spacing: 8px;
-                    PanelHeader {
-                        title: root.tr.history-title;
-                        close => { root.close-overlay(); }
-                    }
-                    Text {
-                        text: root.tr.history-hint;
-                        color: #94A3B8;
-                        font-size: 11px;
-                        wrap: word-wrap;
-                    }
-                    if root.history.length == 0: Text {
-                        text: root.tr.history-empty;
-                        color: #64748B;
-                        font-size: 12px;
-                    }
-                    Flickable {
-                        vertical-stretch: 1;
-                        content-height: histlist.preferred-height;
-                        VerticalLayout {
-                            padding: 2px;
-                            spacing: 6px;
-                            histlist := VerticalLayout {
+                    // ── HISTORIQUE ────────────────────────────────────────
+                    if root.overlay == "history": VerticalLayout {
+                        spacing: 8px;
+                        PanelHeader {
+                            close-label: root.tr.close;
+                            title: root.tr.history-title;
+                            close => { root.close-overlay(); }
+                        }
+                        Text {
+                            text: root.tr.history-hint;
+                            color: Theme.secondary;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        if root.history.length == 0: Text {
+                            text: root.tr.history-empty;
+                            color: Theme.muted;
+                            font-size: 14px;
+                        }
+                        Flickable {
+                            vertical-stretch: 1;
+                            content-height: histlist.preferred-height;
+                            VerticalLayout {
+                                padding: 2px;
                                 spacing: 6px;
-                                for rec in root.history: Rectangle {
-                                    border-radius: 8px;
-                                    background: #0F1524;
-                                    border-width: 1px;
-                                    border-color: #1E293B;
-                                    height: hrow.preferred-height + 12px;
-                                    hrow := HorizontalLayout {
-                                        x: 8px; y: 6px;
-                                        width: parent.width - 16px;
-                                        spacing: 8px;
-                                        alignment: center;
-                                        VerticalLayout {
-                                            spacing: 1px;
-                                            horizontal-stretch: 1;
-                                            Text {
-                                                text: rec.turn + " · " + rec.preview;
-                                                color: #CBD5E1;
+                                histlist := VerticalLayout {
+                                    spacing: 6px;
+                                    for rec in root.history: Rectangle {
+                                        border-radius: 8px;
+                                        background: Theme.canvas;
+                                        border-width: 1px;
+                                        border-color: Theme.border;
+                                        height: hrow.preferred-height + 12px;
+                                        hrow := HorizontalLayout {
+                                            x: 8px; y: 6px;
+                                            width: parent.width - 16px;
+                                            spacing: 8px;
+                                            alignment: center;
+                                            VerticalLayout {
+                                                spacing: 1px;
+                                                horizontal-stretch: 1;
+                                                Text {
+                                                    text: rec.turn + " · " + rec.preview;
+                                                    color: Theme.text;
+                                                    font-size: 14px;
+                                                    wrap: word-wrap;
+                                                    overflow: elide;
+                                                }
+                                                Text {
+                                                    text: rec.meta;
+                                                    color: Theme.muted;
+                                                    font-size: 12px;
+                                                    font-family: "monospace";
+                                                    overflow: elide;
+                                                }
+                                            }
+                                            if rec.has-backup: ActionButton {
+                                                text: root.tr.restore;
+                                                clicked => {
+                                                    root.close-overlay();
+                                                    root.restore-requested(rec.backup);
+                                                }
+                                            }
+                                            if !rec.has-backup: Text {
+                                                text: root.tr.no-backup;
+                                                color: Theme.muted;
                                                 font-size: 12px;
-                                                wrap: word-wrap;
-                                                overflow: elide;
+                                                vertical-alignment: center;
                                             }
-                                            Text {
-                                                text: rec.meta;
-                                                color: #64748B;
-                                                font-size: 10px;
-                                                font-family: "monospace";
-                                                overflow: elide;
-                                            }
-                                        }
-                                        if rec.has-backup: Button {
-                                            text: root.tr.restore;
-                                            clicked => {
-                                                root.close-overlay();
-                                                root.restore-requested(rec.backup);
-                                            }
-                                        }
-                                        if !rec.has-backup: Text {
-                                            text: root.tr.no-backup;
-                                            color: #475569;
-                                            font-size: 10px;
-                                            vertical-alignment: center;
                                         }
                                     }
                                 }

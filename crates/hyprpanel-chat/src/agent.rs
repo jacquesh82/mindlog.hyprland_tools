@@ -259,7 +259,7 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
             UserEvent::Reset => {
                 convo = vec![Message::new_system_message(system.clone())];
                 ui::clear(&weak);
-                ui::append(&weak, "status", &translations.new_conversation);
+                ui::set_status(&weak, &translations.new_conversation);
             }
             UserEvent::ConfigUpdated(new_cfg) => {
                 cfg = *new_cfg;
@@ -307,6 +307,10 @@ pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: We
                     ui::append(&weak, "error", format!("{e:#}"));
                 }
                 ui::set_busy(&weak, false);
+                ui::set_status(&weak, match &mcp {
+                    Some(m) => translations.mcp_tools.replace("{}", &m.tools().len().to_string()),
+                    None => translations.mcp_unavailable.clone(),
+                });
             }
             UserEvent::Restore(name) => {
                 ui::set_busy(&weak, true);

@@ -67,8 +67,9 @@ validation → capture) est transmis aux clients via les *server instructions*.
 
 Client chatbot graphique en **Slint** (crate `crates/hyprpanel-chat`, GPL-3.0
 car Slint est lié sous licence communautaire) : **LYRA — Wayland Configuration
-Assistant**, habillage cyberpunk (fond `#0B0F1A`, wordmark cyan/magenta,
-badge pill), fenêtre où l'on discute directement avec le panneau.
+Assistant**, interface sombre graphite et accent menthe. Son avatar original
+apparaît dans l'en-tête, l'accueil et les réponses. La conversation est limitée
+à une colonne de 800 px pour rester lisible dans une fenêtre maximisée.
 
 - **Boucle d'agent intégrée** : protocole Anthropic Messages en **streaming**
   (SSE), endpoint par défaut `https://api.z.ai/api/anthropic` (GLM-5.3),
@@ -80,7 +81,8 @@ badge pill), fenêtre où l'on discute directement avec le panneau.
 
 ### Interface complète (v2.2)
 
-- **Accueil** avec explication et exemples cliquables ; **aide** (?), **à propos**,
+- **Accueil** avec quatre suggestions en grille : un clic prépare le message,
+  puis Entrée ou « Envoyer » le transmet ; **aide** (?), **à propos**,
   **réglages** (⚙ : langue FR/EN, modèle, endpoint, tokens, clé, statut des clients
   externes) — bulle d'information si Claude Code ou ZCode n'est pas enregistré
   (commandes prêtes à coller ; `hyprpanel check` affiche aussi ce statut).
@@ -95,7 +97,7 @@ badge pill), fenêtre où l'on discute directement avec le panneau.
 
 ### Envoi de fichiers
 
-Bouton **« ＋ fichier »** (sélecteur `zenity`, sélection multiple) ; les pièces
+Bouton **« Joindre »** (sélecteur `zenity`, sélection multiple) ; les pièces
 apparaissent en chips amovibles au-dessus de la saisie, envoyées avec le
 message :
 
@@ -111,6 +113,18 @@ hyprpanel-chat        # ouvre la fenêtre
 # ex. raccourci dans hyprland.lua :
 #   hl.bind(mainMod.."+Y", hl.dsp.exec_cmd("hyprpanel-chat"))
 ```
+
+### Vérification de l'interface sans session graphique
+
+```bash
+cargo run -p hyprpanel-chat --example preview --offline
+```
+
+Cet exemple rend les vrais composants Slint, sans lire la configuration ni
+appeler le LLM ou Hyprland. Il écrit les captures dans `target/lyra-previews/`
+(accueil de 480 à 1366 px, conversation, pièces jointes et panneaux FR/EN)
+et vérifie les interactions clavier et souris. Le prompt de l'avatar est
+conservé dans `crates/hyprpanel-chat/assets/README.md`.
 
 ## Périmètre
 
