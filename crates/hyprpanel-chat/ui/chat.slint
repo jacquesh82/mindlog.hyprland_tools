@@ -1,7 +1,8 @@
-import { Button, LineEdit } from "std-widgets.slint";
+import { Button, LineEdit, ComboBox, TextEdit } from "std-widgets.slint";
 
-// Ligne du journal de conversation.
-// kind : "user" | "assistant" | "tool" | "error" | "status"
+// ─── Structures de données ────────────────────────────────────────────────
+
+// Ligne du journal : kind = "user" | "assistant" | "tool" | "error" | "status"
 export struct MessageRow {
     kind: string,
     text: string,
@@ -13,39 +14,178 @@ export struct AttachmentRow {
     meta: string,   // « 12 Ko · image » par ex.
 }
 
+// Entrée de l'historique de configuration (un tour = un prompt).
+export struct HistoryRow {
+    turn: string,      // « n°3 »
+    preview: string,   // extrait du prompt
+    meta: string,      // horodatage + nom du backup
+    has-backup: bool,
+    backup: string,    // nom du backup (vide si aucun)
+}
+
+// Dictionnaire i18n complet (FR/EN) — rempli par src/i18n.rs.
+export struct TrTexts {
+    send: string, cancel: string, save: string, close: string, new-chat: string,
+    status-starting: string, status-thinking: string, placeholder: string, attach: string,
+    tip-help: string, tip-settings: string, tip-history: string,
+    welcome-title: string, welcome-l1: string, welcome-l2: string, welcome-l3: string,
+    welcome-examples: string, ex1: string, ex2: string, ex3: string, ex4: string,
+    help-title: string, help-body: string,
+    about-title: string, about-body: string,
+    settings-title: string, settings-language: string, settings-model: string,
+    settings-endpoint: string, settings-max-tokens: string, settings-api-key: string,
+    settings-clients: string, settings-clients-ok: string, settings-clients-missing: string,
+    settings-saved: string, settings-invalid: string,
+    history-title: string, history-hint: string, history-empty: string,
+    restore: string, restore-started: string, restore-done: string, restore-failed: string,
+    no-backup: string, clients-notice: string,
+    label-you: string, label-tool: string, label-error: string,
+    new-conversation: string, mcp-unavailable: string, mcp-tools: string,
+}
+
+// ─── Petits composants réutilisables ─────────────────────────────────────
+
+// Titre de panneau overlay : wordmark + intitulé + bouton fermer.
+component PanelHeader inherits HorizontalLayout {
+    in property <string> title;
+    callback close();
+    HorizontalLayout {
+        alignment: center;
+        spacing: 10px;
+        Text {
+            text: "LY";
+            color: #22D3EE;
+            font-weight: 800;
+            font-size: 16px;
+            letter-spacing: 2px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: "RA";
+            color: #D946EF;
+            font-weight: 800;
+            font-size: 16px;
+            letter-spacing: 2px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: " · " + title;
+            color: #E5E7EB;
+            font-size: 15px;
+            font-weight: 600;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        Button { text: "×"; clicked => { close(); } }
+    }
+}
+
+// Bouton-glyphe du header, avec tooltip natif.
+component GlyphButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> tip;
+    in property <bool> enabled: true;
+    callback clicked();
+    height: 28px;
+    width: 30px;
+    border-radius: 6px;
+    background: gb.has-hover && gb.enabled ? #1E293B : transparent;
+    gb := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    Text {
+        text: glyph;
+        color: root.enabled ? #7DD3FC : #475569;
+        font-size: 15px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if root.tip != "": Tooltip {
+        Text { text: root.tip; color: #E2E8F0; font-size: 12px; }
+    }
+}
+
+// Chip d'exemple cliquable de l'écran d'accueil.
+component ExampleChip inherits Rectangle {
+    in property <string> label;
+    callback invoked();
+    height: ech.preferred-height + 16px;
+    min-width: 200px;
+    border-radius: 10px;
+    background: ec.has-hover ? #1E2A47 : #141B2D;
+    border-width: 1px;
+    border-color: ec.has-hover ? #22D3EE : #274060;
+    drop-shadow-blur: 4px;
+    drop-shadow-color: #00000066;
+    ec := TouchArea { clicked => { invoked(); } }
+    ech := Text {
+        x: 10px; y: 8px;
+        width: parent.width - 20px;
+        text: label;
+        color: #E2E8F0;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}
+
+// ─── Fenêtre principale ──────────────────────────────────────────────────
+
 export component ChatWindow inherits Window {
     title: "LYRA — configuration Wayland";
     background: #0B0F1A;
     preferred-width: 560px;
     preferred-height: 720px;
-    min-width: 400px;
-    min-height: 480px;
+    min-width: 420px;
+    min-height: 520px;
 
-    in-out property <string> status: "démarrage…";
+    // état i18n + UI
+    in-out property <TrTexts> tr;
+    in-out property <string> status: "…";
     in-out property <string> model-label: "";
     in-out property <bool> busy: false;
     in-out property <[MessageRow]> messages;
     in-out property <[AttachmentRow]> attachments;
 
+    // overlays : "none" | "help" | "about" | "settings" | "history"
+    in-out property <string> overlay: "none";
+
+    // formulaire de réglages (rempli à l'ouverture par le Rust)
+    in-out property <int> cfg-lang-index: 0;
+    in-out property <string> cfg-model: "";
+    in-out property <string> cfg-base-url: "";
+    in-out property <string> cfg-max-tokens: "";
+    in-out property <string> cfg-api-key: "";
+    in-out property <bool> clients-claude-ok: false;
+    in-out property <bool> clients-zcode-ok: false;
+    in-out property <string> clients-claude-cmd: "";
+    in-out property <string> clients-zcode-cmd: "";
+
+    in-out property <[HistoryRow]> history;
+    in-out property <string> app-version: "";
+
     callback send(string);
     callback new-conversation();
     callback attach-clicked();
     callback remove-attachment(int);
+    callback open-settings();
+    callback close-overlay();
+    callback save-settings();
+    callback restore-requested(string);
 
-    // Ancre le défilement sur le message le plus récent.
     public function scroll-bottom() {
         flick.content-y = Math.max(0px, flick.content-height - flick.height);
     }
 
     VerticalLayout {
-        // ── En-tête : wordmark LYRA + pill ─────────────────────────────
+        // ── En-tête : wordmark + pill + boutons ──────────────────────────
         Rectangle {
             height: 44px;
             background: #111827;
             HorizontalLayout {
                 padding-left: 14px;
                 padding-right: 8px;
-                spacing: 10px;
+                spacing: 8px;
                 alignment: center;
                 HorizontalLayout {
                     alignment: start;
@@ -92,15 +232,32 @@ export component ChatWindow inherits Window {
                     overflow: elide;
                     horizontal-stretch: 1;
                 }
+                GlyphButton {
+                    glyph: "⟲";
+                    tip: root.tr.tip-history;
+                    enabled: !root.busy;
+                    clicked => { root.overlay = "history"; }
+                }
+                GlyphButton {
+                    glyph: "⚙";
+                    tip: root.tr.tip-settings;
+                    enabled: !root.busy;
+                    clicked => { root.open-settings(); }
+                }
+                GlyphButton {
+                    glyph: "?";
+                    tip: root.tr.tip-help;
+                    clicked => { root.overlay = "help"; }
+                }
                 Button {
-                    text: "↺ nouvelle";
+                    text: root.tr.new-chat;
                     enabled: !root.busy;
                     clicked => { root.new-conversation(); }
                 }
             }
         }
 
-        // ── Journal des messages ───────────────────────────────────────
+        // ── Journal des messages ─────────────────────────────────────────
         flick := Flickable {
             vertical-stretch: 1;
             content-height: log.preferred-height;
@@ -109,6 +266,62 @@ export component ChatWindow inherits Window {
                 spacing: 8px;
                 log := VerticalLayout {
                     spacing: 8px;
+
+                    // Écran d'accueil quand la conversation est vide.
+                    if root.messages.length == 0: VerticalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.tr.welcome-title;
+                                color: #E5E7EB;
+                                font-size: 20px;
+                                font-weight: 700;
+                            }
+                        }
+                        for line[i] in [root.tr.welcome-l1, root.tr.welcome-l2, root.tr.welcome-l3]: HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                width: root.width - 48px;
+                                text: line;
+                                color: #C3CDDE;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            Text {
+                                text: root.tr.welcome-examples;
+                                color: #7DD3FC;
+                                font-size: 12px;
+                                letter-spacing: 1px;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            ExampleChip { label: root.tr.ex1; invoked => { root.send(root.tr.ex1); } }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            ExampleChip { label: root.tr.ex2; invoked => { root.send(root.tr.ex2); } }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            ExampleChip { label: root.tr.ex3; invoked => { root.send(root.tr.ex3); } }
+                        }
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 8px;
+                            ExampleChip { label: root.tr.ex4; invoked => { root.send(root.tr.ex4); } }
+                        }
+                    }
+
                     for row in root.messages: Rectangle {
                         if row.kind == "status": HorizontalLayout {
                             alignment: center;
@@ -172,7 +385,7 @@ export component ChatWindow inherits Window {
                                     width: parent.width - 24px;
                                     spacing: 2px;
                                     Text {
-                                        text: "outil";
+                                        text: root.tr.label-tool;
                                         color: #22D3EE;
                                         font-size: 10px;
                                         font-weight: 700;
@@ -213,7 +426,7 @@ export component ChatWindow inherits Window {
             }
         }
 
-        // ── Pièces jointes en attente ──────────────────────────────────
+        // ── Pièces jointes en attente ────────────────────────────────────
         if root.attachments.length > 0: Rectangle {
             background: #0D1322;
             height: chips.preferred-height + 8px;
@@ -260,7 +473,7 @@ export component ChatWindow inherits Window {
             }
         }
 
-        // ── Saisie ────────────────────────────────────────────────────
+        // ── Saisie ───────────────────────────────────────────────────────
         Rectangle {
             background: #111827;
             height: 52px;
@@ -269,14 +482,14 @@ export component ChatWindow inherits Window {
                 spacing: 8px;
                 alignment: center;
                 Button {
-                    text: "＋ fichier";
+                    text: root.tr.attach;
                     enabled: !root.busy;
                     clicked => { root.attach-clicked(); }
                 }
                 le := LineEdit {
                     horizontal-stretch: 1;
-                    placeholder-text: "Demander un réglage à LYRA… (Entrée pour envoyer)";
-                    enabled: !root.busy;
+                    placeholder-text: root.tr.placeholder;
+                    enabled: !root.busy && root.overlay == "none";
                     accepted(t) => {
                         if (t != "" || root.attachments.length > 0) {
                             root.send(t);
@@ -285,12 +498,253 @@ export component ChatWindow inherits Window {
                     }
                 }
                 Button {
-                    text: "envoyer";
+                    text: root.tr.send;
                     enabled: !root.busy && (le.text != "" || root.attachments.length > 0);
                     clicked => {
                         if (le.text != "" || root.attachments.length > 0) {
                             root.send(le.text);
                             le.text = "";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Overlays modaux ──────────────────────────────────────────────────
+    if root.overlay != "none": Rectangle {
+        background: #000000B3;
+        TouchArea {
+            clicked => { root.close-overlay(); }
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(root.width - 40px, 470px);
+            height: min(root.height - 60px, 560px);
+            border-radius: 14px;
+            background: #141B2D;
+            border-width: 1px;
+            border-color: #22D3EE33;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: #000000AA;
+
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+
+                // ── AIDE ──────────────────────────────────────────────
+                if root.overlay == "help": VerticalLayout {
+                    spacing: 8px;
+                    PanelHeader {
+                        title: root.tr.help-title;
+                        close => { root.close-overlay(); }
+                    }
+                    TextEdit {
+                        vertical-stretch: 1;
+                        read-only: true;
+                        wrap: word-wrap;
+                        text: root.tr.help-body;
+                        font-size: 12px;
+                    }
+                }
+
+                // ── À PROPOS ──────────────────────────────────────────
+                if root.overlay == "about": VerticalLayout {
+                    spacing: 8px;
+                    PanelHeader {
+                        title: root.tr.about-title;
+                        close => { root.close-overlay(); }
+                    }
+                    TextEdit {
+                        vertical-stretch: 1;
+                        read-only: true;
+                        wrap: word-wrap;
+                        text: root.tr.about-body;
+                        font-size: 12px;
+                    }
+                }
+
+                // ── RÉGLAGES ──────────────────────────────────────────
+                if root.overlay == "settings": VerticalLayout {
+                    spacing: 8px;
+                    PanelHeader {
+                        title: root.tr.settings-title;
+                        close => { root.close-overlay(); }
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        content-height: setform.preferred-height;
+                        VerticalLayout {
+                            padding: 2px;
+                            spacing: 8px;
+                            setform := VerticalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.tr.settings-language;
+                                    color: #7DD3FC;
+                                    font-size: 11px;
+                                    letter-spacing: 1px;
+                                }
+                                ComboBox {
+                                    model: ["Français", "English"];
+                                    current-index <=> root.cfg-lang-index;
+                                }
+                                Text {
+                                    text: root.tr.settings-model;
+                                    color: #7DD3FC;
+                                    font-size: 11px;
+                                    letter-spacing: 1px;
+                                }
+                                LineEdit { text: root.cfg-model; }
+                                Text {
+                                    text: root.tr.settings-endpoint;
+                                    color: #7DD3FC;
+                                    font-size: 11px;
+                                    letter-spacing: 1px;
+                                }
+                                LineEdit { text: root.cfg-base-url; }
+                                Text {
+                                    text: root.tr.settings-max-tokens;
+                                    color: #7DD3FC;
+                                    font-size: 11px;
+                                    letter-spacing: 1px;
+                                }
+                                LineEdit {
+                                    text: root.cfg-max-tokens;
+                                    input-type: InputType.number;
+                                }
+                                Text {
+                                    text: root.tr.settings-api-key;
+                                    color: #7DD3FC;
+                                    font-size: 11px;
+                                    letter-spacing: 1px;
+                                }
+                                LineEdit {
+                                    text: root.cfg-api-key;
+                                    input-type: InputType.password;
+                                }
+                                Text {
+                                    text: root.tr.settings-clients;
+                                    color: #7DD3FC;
+                                    font-size: 11px;
+                                    letter-spacing: 1px;
+                                }
+                                Text {
+                                    text: "Claude Code : " + (root.clients-claude-ok ? root.tr.settings-clients-ok : root.tr.settings-clients-missing);
+                                    color: root.clients-claude-ok ? #4ADE80 : #FDA4AF;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                if !root.clients-claude-ok: Text {
+                                    text: root.clients-claude-cmd;
+                                    color: #64748B;
+                                    font-size: 10px;
+                                    font-family: "monospace";
+                                    wrap: word-wrap;
+                                }
+                                Text {
+                                    text: "ZCode : " + (root.clients-zcode-ok ? root.tr.settings-clients-ok : root.tr.settings-clients-missing);
+                                    color: root.clients-zcode-ok ? #4ADE80 : #FDA4AF;
+                                    font-size: 11px;
+                                    wrap: word-wrap;
+                                }
+                                if !root.clients-zcode-ok: Text {
+                                    text: root.clients-zcode-cmd;
+                                    color: #64748B;
+                                    font-size: 10px;
+                                    font-family: "monospace";
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button {
+                            text: root.tr.cancel;
+                            clicked => { root.close-overlay(); }
+                        }
+                        Button {
+                            text: root.tr.save;
+                            primary: true;
+                            clicked => { root.save-settings(); }
+                        }
+                    }
+                }
+
+                // ── HISTORIQUE ────────────────────────────────────────
+                if root.overlay == "history": VerticalLayout {
+                    spacing: 8px;
+                    PanelHeader {
+                        title: root.tr.history-title;
+                        close => { root.close-overlay(); }
+                    }
+                    Text {
+                        text: root.tr.history-hint;
+                        color: #94A3B8;
+                        font-size: 11px;
+                        wrap: word-wrap;
+                    }
+                    if root.history.length == 0: Text {
+                        text: root.tr.history-empty;
+                        color: #64748B;
+                        font-size: 12px;
+                    }
+                    Flickable {
+                        vertical-stretch: 1;
+                        content-height: histlist.preferred-height;
+                        VerticalLayout {
+                            padding: 2px;
+                            spacing: 6px;
+                            histlist := VerticalLayout {
+                                spacing: 6px;
+                                for rec in root.history: Rectangle {
+                                    border-radius: 8px;
+                                    background: #0F1524;
+                                    border-width: 1px;
+                                    border-color: #1E293B;
+                                    height: hrow.preferred-height + 12px;
+                                    hrow := HorizontalLayout {
+                                        x: 8px; y: 6px;
+                                        width: parent.width - 16px;
+                                        spacing: 8px;
+                                        alignment: center;
+                                        VerticalLayout {
+                                            spacing: 1px;
+                                            horizontal-stretch: 1;
+                                            Text {
+                                                text: rec.turn + " · " + rec.preview;
+                                                color: #CBD5E1;
+                                                font-size: 12px;
+                                                wrap: word-wrap;
+                                                overflow: elide;
+                                            }
+                                            Text {
+                                                text: rec.meta;
+                                                color: #64748B;
+                                                font-size: 10px;
+                                                font-family: "monospace";
+                                                overflow: elide;
+                                            }
+                                        }
+                                        if rec.has-backup: Button {
+                                            text: root.tr.restore;
+                                            clicked => {
+                                                root.close-overlay();
+                                                root.restore-requested(rec.backup);
+                                            }
+                                        }
+                                        if !rec.has-backup: Text {
+                                            text: root.tr.no-backup;
+                                            color: #475569;
+                                            font-size: 10px;
+                                            vertical-alignment: center;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

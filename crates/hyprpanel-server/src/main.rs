@@ -125,6 +125,18 @@ fn cmd_check() -> i32 {
             let grim_ok = which("grim");
             let grim_note = if grim_ok { "présent" } else { "absent — hypr_screenshot sera indisponible" };
             println!("{} grim (captures) : {grim_note}", if grim_ok { "✓" } else { "⚠" });
+            // clients externes enregistrés auprès du panneau
+            let regs = hyprpanel_core::detect_clients();
+            println!(
+                "{} Claude Code : {}",
+                if regs.claude_code { "✓" } else { "✗" },
+                if regs.claude_code { "enregistré" } else { "non enregistré (commande affichée par install.sh)" }
+            );
+            println!(
+                "{} ZCode : {}",
+                if regs.zcode { "✓" } else { "✗" },
+                if regs.zcode { "enregistré" } else { "non enregistré (~/.zcode/cli/config.json, mcp.servers)" }
+            );
         }
         Err(e) => {
             println!("✗ configuration du démon : {e} (lancez `hyprpanel init`)");

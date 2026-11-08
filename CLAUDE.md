@@ -36,8 +36,11 @@ journalctl --user -u hyprpanel   # logs du daemon
 - Code et messages d'outil en français, identifiants en anglais.
 - Toute nouvelle commande IPC passe par `hyprpanel-core::ipc` avec un test de
   construction du message (voir `ipc::tests`).
-- SSE/LLM : la machine à états (`agent::apply_event`) reste pure et testée ;
-  l'accès UI passe par `ui.rs` (invoke_from_event_loop uniquement).
+- LLM : le transport passe par **langchain-rust** (`Claude`, `Message`,
+  `FunctionDefinition`) — pas de reqwest direct. La boucle d'exécution (streaming
+  UI, pont MCP, timeouts, registre) reste locale et fine.
+- i18n : toute chaîne UI passe par `src/i18n.rs` (struct `Tr` + test de parité
+  FR/EN). Le system prompt suit `chat_config.language`.
 - Pièces jointes : classification/blocs Anthropic dans `agent.rs`
   (`classify_attachment`, `build_user_content`) — purs et testés ; sélecteur
   zenity dans `main.rs` (thread dédié). Le miroir Rust des chips

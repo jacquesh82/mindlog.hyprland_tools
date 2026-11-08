@@ -1,9 +1,10 @@
-//! hyprpanel-chat — fenêtre native (Slint) cliente chatbot du panneau de
-//! configuration Hyprland. Boucle d'agent intégrée (protocole Anthropic
-//! Messages, streaming) qui exécute les outils du daemon via MCP.
+//! LYRA — fenêtre native (Slint) cliente chatbot du panneau de configuration
+//! Hyprland. Boucle d'agent **LangChain Rust** (module claude, streaming),
+//! exécution des outils du daemon via MCP.
 
 mod agent;
 mod chat_config;
+mod i18n;
 mod mcp;
 mod ui;
 
@@ -12,7 +13,7 @@ use anyhow::Context;
 slint::include_modules!();
 
 const USAGE: &str = "\
-hyprpanel-chat — fenêtre de chat du panneau de configuration Hyprland
+LYRA — assistante de configuration Wayland (hyprpanel-chat)
 
 USAGE
   hyprpanel-chat           Ouvre la fenêtre (config chargée/créée si absente)
@@ -41,6 +42,8 @@ fn main() -> anyhow::Result<()> {
 
     let app = ChatWindow::new().context("création de la fenêtre (session Wayland active ?)")?;
     app.set_model_label(cfg.model.clone().into());
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
+    app.set_tr(i18n::tr(cfg.lang()).to_slint());
     {
         let model: slint::ModelRc<MessageRow> =
             std::rc::Rc::new(slint::VecModel::<MessageRow>::from(Vec::new())).into();
@@ -48,10 +51,23 @@ fn main() -> anyhow::Result<()> {
         let chips: slint::ModelRc<AttachmentRow> =
             std::rc::Rc::new(slint::VecModel::<AttachmentRow>::from(Vec::new())).into();
         app.set_attachments(chips);
+        let history: slint::ModelRc<HistoryRow> =
+            std::rc::Rc::new(slint::VecModel::<HistoryRow>::from(Vec::new())).into();
+        app.set_history(history);
+    }
+    // Statut clients externes pour le panneau de réglages.
+    {
+        let regs = hyprpanel_core::detect_clients();
+        app.set_clients_claude_ok(regs.claude_code);
+        app.set_clients_zcode_ok(regs.zcode);
+        if let Ok(settings) = hyprpanel_core::Settings::load() {
+            let snippets = hyprpanel_core::registration_snippets(&settings.token, settings.port);
+            app.set_clients_claude_cmd(snippets.claude_code.into());
+            app.set_clients_zcode_cmd(snippets.zcode.into());
+        }
     }
 
-    // Miroir Rust des pièces jointes (le modèle Slint ne s'itère pas depuis
-    // les callbacks ; les deux restent synchronisés sous ce mutex).
+    // Miroir Rust des pièces jointes (le modèle Slint n'est que l'affichage).
     let pending_files: std::sync::Arc<std::sync::Mutex<Vec<std::path::PathBuf>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
@@ -59,7 +75,11 @@ fn main() -> anyhow::Result<()> {
     // hébergé par un thread dédié, la boucle d'événements Slint garde le main.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<agent::UserEvent>();
     {
+        let tx_send = tx.clone();
         let tx_reset = tx.clone();
+        let tx_restore = tx.clone();
+        let tx_cfg = tx.clone();
+
         let files_for_send = pending_files.clone();
         let weak_send = app.as_weak();
         app.on_send(move |text| {
@@ -68,14 +88,78 @@ fn main() -> anyhow::Result<()> {
                 return;
             }
             ui::attachments_clear(&weak_send);
-            let _ = tx.send(agent::UserEvent::Input { text: text.trim().to_string(), files });
+            let _ = tx_send.send(agent::UserEvent::Input { text: text.trim().to_string(), files });
         });
+
         app.on_new_conversation(move || {
             let _ = tx_reset.send(agent::UserEvent::Reset);
         });
 
-        // Sélecteur de fichiers (zenity) dans un thread dédié — il bloque
-        // jusqu'à la fermeture de la boîte de dialogue.
+        app.on_restore_requested(move |backup| {
+            if !backup.is_empty() {
+                let _ = tx_restore.send(agent::UserEvent::Restore(backup.to_string()));
+            }
+        });
+
+        // ── Réglages ────────────────────────────────────────────────────
+        let weak_settings = app.as_weak();
+        let cfg_for_settings = std::sync::Arc::new(std::sync::Mutex::new(cfg.clone()));
+        let cfg_for_open = cfg_for_settings.clone();
+        app.on_open_settings(move || {
+            let weak = weak_settings.clone();
+            let cfg = cfg_for_open.lock().expect("cfg empoisonnée").clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = weak.upgrade() else { return };
+                app.set_cfg_lang_index(if cfg.lang() == i18n::Lang::En { 1 } else { 0 });
+                app.set_cfg_model(cfg.model.clone().into());
+                app.set_cfg_base_url(cfg.base_url.clone().into());
+                app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
+                app.set_cfg_api_key(cfg.api_key.clone().into());
+                app.set_overlay("settings".into());
+            });
+        });
+
+        let weak_save = app.as_weak();
+        app.on_save_settings(move || {
+            let Some(app) = weak_save.upgrade() else { return };
+            let mut cfg = cfg_for_settings.lock().expect("cfg empoisonnée").clone();
+            cfg.language = if app.get_cfg_lang_index() == 1 { "en".into() } else { "fr".into() };
+            cfg.model = app.get_cfg_model().to_string();
+            cfg.base_url = app.get_cfg_base_url().to_string();
+            cfg.max_tokens = match app.get_cfg_max_tokens().trim().parse::<u32>() {
+                Ok(n) if n >= 256 && n <= 200_000 => n,
+                _ => {
+                    app.set_status(app.get_tr().settings_invalid.clone());
+                    app.set_overlay("none".into());
+                    return;
+                }
+            };
+            // clé : vide = inchangée (le champ password est prérempli, mais
+            // on accepte une saisie vide comme « ne pas changer »)
+            let key = app.get_cfg_api_key().trim().to_string();
+            if !key.is_empty() {
+                cfg.api_key = key;
+            }
+            match cfg.save() {
+                Ok(()) => {
+                    *cfg_for_settings.lock().expect("cfg empoisonnée") = cfg.clone();
+                    let _ = tx_cfg.send(agent::UserEvent::ConfigUpdated(Box::new(cfg)));
+                    app.set_overlay("none".into());
+                }
+                Err(e) => {
+                    app.set_status(format!("config : {e}").into());
+                }
+            }
+        });
+
+        let weak_close = app.as_weak();
+        app.on_close_overlay(move || {
+            if let Some(app) = weak_close.upgrade() {
+                app.set_overlay("none".into());
+            }
+        });
+
+        // ── Sélecteur de fichiers (zenity) ──────────────────────────────
         let files_for_pick = pending_files.clone();
         let weak_pick = app.as_weak();
         app.on_attach_clicked(move || {
@@ -119,7 +203,7 @@ fn main() -> anyhow::Result<()> {
 
     let weak = app.as_weak();
     std::thread::Builder::new()
-        .name("hyprpanel-agent".into())
+        .name("lyra-agent".into())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
                 Ok(rt) => rt,

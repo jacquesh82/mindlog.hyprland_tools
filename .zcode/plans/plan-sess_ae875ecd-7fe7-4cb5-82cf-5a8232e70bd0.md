@@ -1,43 +1,60 @@
-# LYRA — identité visuelle + envoi de fichiers dans hyprpanel-chat
+# LYRA v2.2 — LangChain Rust, onboarding, réglages, à propos, i18n, historique restaurable, statut clients
 
 ## Contexte
 
-L'utilisateur baptise l'assistante **LYRA** et fournit une référence visuelle : bannière cyberpunk « LYRA — Wayland Configuration Assistant » (fond `#0B0F1A`, surfaces `#141B2D`/`#1A2238`, néons cyan `#22D3EE` / magenta `#D946EF` / rose `#EC4899`, vert succès `#4ADE80`, badge pill, glows). Il veut aussi **pouvoir envoyer des fichiers** à l'interface (images + textes) pour enrichir les demandes au LLM.
+LYRA (fenêtre Slint `hyprpanel-chat`) est fonctionnelle mais minimale. Cette itération la complète : **agent réimplémenté sur LangChain Rust**, écran d'accueil avec exemples cliquables, panneau d'aide, réglages, à propos, **i18n FR/EN**, **historique de configuration restaurable par prompt**, et **détection de l'enregistrement MCP de Claude Code/Zcode** avec messages et commandes prêtes à coller.
 
-Facts vérifiés : `zenity` présent (sélecteur de fichiers), Noto Sans + Noto Color Emoji installés, pas de police display exotique confirmée → wordmark en Noto Sans gras + `letter-spacing` + bicolore cyan/magenta.
+Étude préalable (docs.rs, sources v8.0.0) : le module `claude` de langchain-rust 8 (MIT, publié le 3 nov. 2026) fait tout ce que faisait notre code maison — `with_api_key` / `with_base_url` (endpoint final `{base_url}/v1/messages` → compatible `https://api.z.ai/api/anthropic`) / `with_model` (ID arbitraire → GLM-5.3) ; tool use natif Anthropic (fonctions → `input_schema`, `tool_choice`, historique tool_use/tool_result converti automatiquement) ; streaming `stream()` avec accumulateur `input_json_delta` ; `Message` avec `images: Vec<ImageContent>` (base64 brut, media type détecté par magic bytes) et `thinking` round-trip. Features cargo : aucune requise pour claude.
 
-## A. Restyle LYRA (`crates/hyprpanel-chat/ui/chat.slint`)
+## A. Agent sur LangChain Rust (`agent.rs` refondu)
 
-- **Identité** : titre de fenêtre « LYRA — configuration Wayland » ; en-tête = wordmark `LY` (cyan) + `RA` (magenta), gras, `letter-spacing: 4px`, + pill « WAYLAND CONFIGURATION ASSISTANT » (petites capitales espacées, bordure cyan, léger `drop-shadow` néon). Bulles assistant étiquetées « LYRA ».
-- **Palette swap** complet : fond `#0B0F1A`, barre `#111827`, bulles assistant `#1A2238` (accent `#22D3EE`), bulles utilisateur en dégradé `@linear-gradient(135°, #8B5CF6 → #EC4899)` texte blanc, bulles outil `#0F1524` mono (accent cyan), erreur `#2D1220`/`#F43F5E`, statut « ● » vert `#4ADE80` quand connecté. Saisie sur `#111827`, bouton envoyer accent cyan.
+- **Boucle LLM** : `Claude::new().with_model(..).with_api_key(..).with_base_url(..)` (reconstruit à chaque `ConfigUpdated`) ; conversation = `Vec<langchain Message>` ; outils MCP convertis en `FunctionDefinition::new(name, description, input_schema)` passés via `CallOptions::with_functions`.
+- **Streaming UI** : les événements `LLMEvent::Text` mettent à jour la bulle LYRA token par token ; `Done(GenerateResult)` livre `tool_calls` → bulles outil → `McpSession::call` → `Message::new_ai_message_with_tool_calls` + `Message::new_tool_message` → boucle (≤ 12 tours, timeouts 180 s/LLM, 30 s/outil).
+- **Pièces jointes** : `build_user_content` simplifié → `Message::new_human_message(texte+fichiers texte inlinés).with_images(vec![ImageContent::from(base64)])`.
+- **Supprimé** : `request_stream`, la machine SSE (`SseState`, `apply_event`, `next_data_line`) et le dep `reqwest` direct (HTTP LLM désormais porté par langchain) ; les tests SSE cèdent la place aux tests pièces jointes (`Message` avec images/base64).
+- La boucle d'exécution reste fine et maison (streaming vers l'UI, pont MCP, timeouts, registre de tours) : les `AgentExecutor` standards n'exposent ni streaming d'UI ni pont MCP — c'est bien LangChain qui porte client LLM, messages, outils et SSE.
 
-## B. Envoi de fichiers
+## B. i18n (`src/i18n.rs` nouveau)
 
-- **UI** : bouton « ＋ fichier » à gauche de la saisie ; ligne de **chips** de pièces jointes au-dessus (nom + taille, bouton « × » par chip). Nouvelles struct/callbacks Slint : `AttachmentRow {name, meta}`, `attach-clicked()`, `remove-attachment(int)`.
-- **Sélecteur** (main.rs) : thread dédié → `zenity --file-selection --multiple --separator=\n` (env Wayland hérité), retour via `invoke_from_event_loop` ; miroir Rust `Arc<Mutex<Vec<PathBuf>>>` synchronisé avec le modèle (vidé au moment de l'envoi).
-- **Canal** : `UserEvent::Text` devient `UserEvent::Input { text, files: Vec<PathBuf> }`.
-- **Agent** (agent.rs, fonctions pures testées) : `build_user_content()` construit les blocs Anthropic du message utilisateur :
-  - images `png/jpeg/webp/gif` ≤ 5 Mo → bloc `{"type":"image","source":{"type":"base64",…}}` (crate `base64` ajoutée)
-  - fichiers texte (md/lua/conf/toml/json/rs/py/sh/yaml/html… ) ≤ 64 Ko → bloc texte délimité `— fichier <nom> —`
-  - autres (pdf, binaires) → note dans le texte « pièce non transmise (type non pris en charge) »
-  - la bulle utilisateur affiche les pièces (`📎 nom (taille)`)
-- Les pièces restent dans l'historique de la conversation (renvoyées aux tours suivants — acceptable pour un usage personnel).
+- `Lang { Fr, En }` + dictionnaire `Tr` (~60 chaînes : accueil, aide, exemples, réglages, à propos, historique, clients, boutons) exposé comme struct Slint `TrTexts` (propriété `tr`, swap immédiat).
+- `chat.toml` + `language = "fr"` ; le system prompt suit la langue.
+- Test : parité des clés FR/EN, aucune chaîne vide.
 
-## C. Finitions
+## C. UI : accueil, aide, à propos, réglages, header
 
-- README/CLAUDE.md : section LYRA (branding, pièces jointes, limites : PDF non supporté en v1, rejet propre si l'API refuse les images). CONTEXT.md + commit.
+- Header : boutons à glyphes avec `Tooltip` natif — `?` aide, `⚙` réglages, `⟲` historique (+ « ↺ nouvelle »).
+- **Accueil** (état vide) : wordmark + 3 lignes + **4 exemples cliquables** qui envoient le prompt.
+- **Aide** : `TextEdit` read-only (workflow, 20 outils, pièces jointes, restauration, limites). **À propos** : version, GPL-3.0 (Slint communauté), stack, dépôt.
+- **Réglages** : Langue (ComboBox), Modèle, Endpoint, Max tokens, Clé API (`InputType.password`), section clients (voir E), [enregistrer] → `chat.toml` + `UserEvent::ConfigUpdated` + swap `tr`.
+
+## D. Historique de configuration restaurable
+
+- Avant chaque tour : `hypr_backup { label: "lyra-turn-NNN" }` (nom parsé de « backup créé : X ») ; `TurnRecord { turn, timestamp, preview, backup }` persisté dans `~/.local/state/hyprpanel/lyra-history.json` (rechargé au démarrage).
+- Panneau historique : entrées antéchronologiques + [restaurer] → `UserEvent::Restore` → `hypr_restore_backup` + `hypr_reload` via MCP + bulles de confirmation. « Nouvelle conversation » vide le chat, conserve le registre.
+
+## E. Statut clients Claude Code / ZCode (`hyprpanel-core::clients`, nouveau)
+
+- `detect_clients()` : Claude Code = `hyprpanel` dans `mcpServers` global ou d'un projet de `~/.claude.json` ; ZCode = `mcp.servers.hyprpanel` dans `~/.zcode/cli/config.json`. Parsing pur sur fixtures (tests).
+- `registration_snippets(token, port)` : commandes prêtes à coller (token via `Settings::load()`).
+- Dans LYRA : bulle d'information au démarrage si un client manque + section « clients externes » dans les réglages (statut ✔/✗ + commandes, token inclus — usage local). Dans `hyprpanel check` : lignes ✓/✗ par client.
 
 ## Fichiers
 
-`crates/hyprpanel-chat/ui/chat.slint` (restyle + chips), `src/main.rs` (zenity, miroir pièces), `src/agent.rs` (UserEvent, build_user_content + classification pure), `Cargo.toml` (+base64), docs. Réutilisation : `ui.rs` (append/set_row/invoke_from_event_loop), `truncate_str` d'agent.rs.
+`crates/hyprpanel-chat/{ui/chat.slint, src/{i18n.rs (nouveau), agent.rs, main.rs, ui.rs, chat_config.rs}}`, `crates/hyprpanel-core/src/clients.rs` (nouveau), `crates/hyprpanel-server/src/main.rs` (check), Cargo.toml (+langchain-rust 8, −reqwest), README/CLAUDE.md/CONTEXT + commit.
 
 ## Vérification
 
-1. `cargo test` — nouveaux tests : classification des pièces, `build_user_content` avec fichiers temporaires (image factice encodée base64, fichier texte, type refusé), cas texte vide + pièce seule
-2. Rebuild release + `install.sh` + relance de la fenêtre (arrêt de l'unit transitoire précédente)
-3. **Porte visuelle** : capture via `hypr_screenshot` du daemon → analyse d'image pour confirmer wordmark LYRA, palette, chips ; corriger si écart
-4. Test clic réel laissé à l'utilisateur (zenity + envoi d'une capture d'écran au LLM) — instructions fournies ; le pipeline est couvert par les tests unitaires
+1. `cargo test` — parité i18n, round-trip registre/config (language), pièces jointes → `Message` (images+texte), parsing « backup créé : », détection clients (fixtures présent/absent/malformé)
+2. **Spike LangChain d'abord** : avant le refact complet, un mini-test (ignoré, réseau) `Claude` + base_url Z.ai + `with_model("GLM-5.3")` + un appel streaming sans outil — valide l'endpoint ; si la clé coding-plan refusait l'endpoint Anthropic natif de langchain (en-têtes/version), fallback documenté : conserver l'implémentation SSE actuelle pour le transport
+3. Release + install + relance ; **porte visuelle** `hypr_screenshot` + analyse : accueil FR, boutons header, statuts clients (✔/✔ sur cette machine — pas de bulle attendue)
+4. Conversation réelle (état écrans, gaps réversibles) → streaming visibles, bulles outils ; historique → [restaurer] → `hypr_get_option`/`hypr_config_errors` confirment le retour arrière
+5. Bascule EN dans les réglages → capture de contrôle ; commit
 
 ## Hors périmètre
 
-PDF/documents binaires, glisser-déposer (DropArea non standard en Slint 1.18), historique persistant, streaming des résultats d'outils.
+Drag & drop, PDF, historique de conversation persistant, AgentExecutor standard (voir A), enregistrement automatique des clients (commandes affichées, jamais écrites sans accord).
+
+## Références
+
+- [langchain-rust — crates.io](https://crates.io/crates/langchain-rust) · [module claude (docs.rs)](https://docs.rs/langchain-rust/latest/langchain_rust/llm/claude/index.html) · [dépôt GitHub](https://github.com/Abraxas-365/langchain-rust)
+- [Slint 1.18.1](https://crates.io/crates/slint) (Tooltip natif, InputType.password, TextEdit read-only — vérifiés dans les sources)

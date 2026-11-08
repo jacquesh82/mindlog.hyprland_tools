@@ -11,8 +11,21 @@ pub struct ChatConfig {
     pub api_key: String,
     pub model: String,
     pub max_tokens: u32,
+    /// Langue de l'interface et du prompt système : "fr" (défaut) ou "en".
+    #[serde(default = "default_language")]
+    pub language: String,
     /// Optionnel ; sinon composé depuis la config du daemon (port + jeton).
     pub mcp_url: Option<String>,
+}
+
+impl ChatConfig {
+    pub fn lang(&self) -> crate::i18n::Lang {
+        crate::i18n::Lang::parse(&self.language)
+    }
+}
+
+fn default_language() -> String {
+    "fr".into()
 }
 
 fn home() -> PathBuf {
@@ -29,6 +42,15 @@ pub fn config_path() -> PathBuf {
     xdg_config_dir().join("hyprpanel/chat.toml")
 }
 
+/// Registre des tours de conversation (restauration de config) :
+/// `$XDG_STATE_HOME/hyprpanel/lyra-history.json`.
+pub fn state_history_path() -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(".local/state"))
+        .join("hyprpanel/lyra-history.json")
+}
+
 impl ChatConfig {
     pub fn defaults() -> Self {
         Self {
@@ -36,8 +58,20 @@ impl ChatConfig {
             api_key: String::new(),
             model: "GLM-5.3".into(),
             max_tokens: 8192,
+            language: "fr".into(),
             mcp_url: None,
         }
+    }
+
+    /// Écrit la config (chmod 600) — appelé par le panneau de réglages.
+    pub fn save(&self) -> Result<(), String> {
+        let path = config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, self.as_toml()).map_err(|e| e.to_string())?;
+        restrict_permissions(&path);
+        Ok(())
     }
 
     pub fn load() -> Result<Self, String> {

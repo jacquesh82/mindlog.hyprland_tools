@@ -128,3 +128,36 @@ pub fn attachments_clear(weak: &Weak<ChatWindow>) {
         }
     });
 }
+
+/// Remplace tout l'historique (l'affichage veut l'ordre antéchronologique).
+pub fn history_set(weak: &Weak<ChatWindow>, records: &[crate::agent::TurnRecord]) {
+    let rows: Vec<crate::HistoryRow> = records
+        .iter()
+        .rev()
+        .map(|r| crate::HistoryRow {
+            turn: format!("n°{}", r.turn).into(),
+            preview: r.preview.clone().into(),
+            meta: format!("{} · {}", r.timestamp, r.backup.as_deref().unwrap_or("—")).into(),
+            has_backup: r.backup.is_some(),
+            backup: r.backup.clone().unwrap_or_default().into(),
+        })
+        .collect();
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let model = ui.get_history();
+        if let Some(m) = model.as_any().downcast_ref::<slint::VecModel<crate::HistoryRow>>() {
+            m.set_vec(rows);
+        }
+    });
+}
+
+/// Remplace le dictionnaire i18n (changement de langue à chaud).
+pub fn set_tr(weak: &Weak<ChatWindow>, texts: crate::TrTexts) {
+    let weak = weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.set_tr(texts);
+        }
+    });
+}

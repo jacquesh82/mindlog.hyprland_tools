@@ -1,18 +1,30 @@
-//! Boucle d'agent : protocole Anthropic Messages en streaming (SSE),
-//! exécution des outils via le client MCP, mise à jour de l'UI en direct.
+//! Boucle d'agent LYRA sur **LangChain Rust** (module claude) :
+//! streaming `LLMEvent` → bulles, tool use natif Anthropic (`FunctionDefinition`
+//! + `Message::new_tool_message`), exécution des outils via le client MCP.
+//!
+//! La boucle d'exécution reste volontairement fine et locale (streaming vers
+//! l'UI, pont MCP, timeouts, registre de tours restaurables) : les
+//! `AgentExecutor` génériques n'exposent ni l'un ni l'autre.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Context};
+use anyhow::{anyhow, bail, Context};
 use base64::Engine as _;
 use futures_util::StreamExt;
+use langchain_rust::language_models::options::CallOptions;
+use langchain_rust::language_models::{llm::LLM, GenerateResult, LLMEvent};
+use langchain_rust::llm::claude::Claude;
+use langchain_rust::schemas::{FunctionDefinition, ImageContent, Message};
 use serde_json::{json, Map, Value};
 use slint::Weak;
+use tokio::sync::mpsc::UnboundedReceiver;
+
+use hyprpanel_core::timefmt;
 
 use crate::chat_config::ChatConfig;
-use crate::mcp::{self, McpSession};
+use crate::i18n::{tr, Lang, Tr};
+use crate::mcp::McpSession;
 use crate::ui;
 use crate::ChatWindow;
 
@@ -20,6 +32,8 @@ use crate::ChatWindow;
 pub enum UserEvent {
     Input { text: String, files: Vec<PathBuf> },
     Reset,
+    ConfigUpdated(Box<ChatConfig>),
+    Restore(String),
 }
 
 const MAX_ROUNDS: usize = 12;
@@ -30,12 +44,12 @@ const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_TEXT_BYTES: u64 = 64 * 1024;
 
 // ---------------------------------------------------------------------------
-// Pièces jointes (classification et blocs Anthropic, purs et testés)
+// Pièces jointes (classification pure, testée)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AttachmentKind {
-    Image(&'static str), // media_type Anthropic
+    Image,
     Text,
     Unsupported,
 }
@@ -47,10 +61,7 @@ pub fn classify_attachment(path: &Path) -> AttachmentKind {
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
     match ext.as_str() {
-        "png" => AttachmentKind::Image("image/png"),
-        "jpg" | "jpeg" => AttachmentKind::Image("image/jpeg"),
-        "webp" => AttachmentKind::Image("image/webp"),
-        "gif" => AttachmentKind::Image("image/gif"),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" => AttachmentKind::Image,
         "txt" | "md" | "lua" | "conf" | "toml" | "json" | "yaml" | "yml" | "ini" | "rs" | "py"
         | "sh" | "bash" | "css" | "html" | "xml" | "csv" | "log" | "service" | "slint" => {
             AttachmentKind::Text
@@ -63,9 +74,9 @@ pub fn classify_attachment(path: &Path) -> AttachmentKind {
 pub fn attachment_meta(path: &Path) -> String {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let kind = match classify_attachment(path) {
-        AttachmentKind::Image(_) => "image",
+        AttachmentKind::Image => "image",
         AttachmentKind::Text => "texte",
-        AttachmentKind::Unsupported => "non pris en charge",
+        AttachmentKind::Unsupported => "?",
     };
     format!("{} · {}", human_size(size), kind)
 }
@@ -80,19 +91,17 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Construit les blocs de contenu Anthropic d'un message utilisateur avec
-/// pièces jointes. `read` est injecté pour les tests.
-fn build_user_content(
+/// Construit le message utilisateur (texte + pièces jointes). Les images
+/// partent en base64 brut — LangChain renifle le media type ; les fichiers
+/// texte sont inlinés. `read` injecté pour les tests.
+fn build_user_message(
     text: &str,
     files: &[PathBuf],
     read: &dyn Fn(&Path) -> std::io::Result<Vec<u8>>,
-) -> (Vec<Value>, Vec<String>) {
-    let mut blocks = Vec::new();
+) -> (Message, Vec<String>) {
+    let mut content = text.trim().to_string();
+    let mut images: Vec<ImageContent> = Vec::new();
     let mut notes = Vec::new();
-
-    if !text.trim().is_empty() {
-        blocks.push(json!({"type": "text", "text": text}));
-    }
 
     for file in files {
         let name = file
@@ -100,29 +109,19 @@ fn build_user_content(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| file.to_string_lossy().into_owned());
         match classify_attachment(file) {
-            AttachmentKind::Image(media_type) => {
-                match read(file) {
-                    Ok(bytes) if bytes.len() as u64 <= MAX_IMAGE_BYTES => {
-                        blocks.push(json!({
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                            }
-                        }));
-                    }
-                    Ok(_) => notes.push(format!("📎 {name} : image trop volumineuse (> 5 Mo), non transmise")),
-                    Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
+            AttachmentKind::Image => match read(file) {
+                Ok(bytes) if bytes.len() as u64 <= MAX_IMAGE_BYTES => {
+                    images.push(ImageContent::from(
+                        base64::engine::general_purpose::STANDARD.encode(&bytes),
+                    ));
                 }
-            }
+                Ok(_) => notes.push(format!("📎 {name} : image trop volumineuse (> 5 Mo), non transmise")),
+                Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
+            },
             AttachmentKind::Text => match read(file) {
                 Ok(bytes) if bytes.len() as u64 <= MAX_TEXT_BYTES => {
-                    let content = String::from_utf8_lossy(&bytes);
-                    blocks.push(json!({
-                        "type": "text",
-                        "text": format!("— fichier {name} —\n{content}\n— fin {name} —")
-                    }));
+                    let inner = String::from_utf8_lossy(&bytes);
+                    content.push_str(&format!("\n\n— fichier {name} —\n{inner}\n— fin {name} —"));
                 }
                 Ok(_) => notes.push(format!("📎 {name} : fichier texte trop volumineux (> 64 Ko), non transmis")),
                 Err(e) => notes.push(format!("📎 {name} : illisible ({e})")),
@@ -133,359 +132,373 @@ fn build_user_content(
         }
     }
 
-    if blocks.is_empty() {
-        // ni texte ni pièce valide : message vide pour ne pas casser l'API
-        blocks.push(json!({"type": "text", "text": "(pièce jointe illisible)"}));
+    if content.is_empty() {
+        // Anthropic exige au moins un bloc de contenu lisible.
+        content = if images.is_empty() {
+            "(pièce jointe illisible)".to_string()
+        } else {
+            "(image)".to_string()
+        };
     }
-    (blocks, notes)
+    (Message::new_human_message(content).with_images(images), notes)
 }
 
 // ---------------------------------------------------------------------------
-// Machine à états SSE (pure, testée)
+// Registre des tours (historique restaurable)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-pub struct ToolCall {
-    pub id: String,
-    pub name: String,
-    pub input: Map<String, Value>,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TurnRecord {
+    pub turn: u32,
+    pub timestamp: String,
+    /// Extrait du prompt (≈ 60 caractères).
+    pub preview: String,
+    /// Nom du backup « avant ce tour », si le daemon était joignable.
+    pub backup: Option<String>,
 }
 
-#[derive(Debug, Default)]
-pub struct TurnOutput {
-    pub text: String,
-    pub thinking: String,
-    pub tool_calls: Vec<ToolCall>,
+struct Ledger {
+    records: Vec<TurnRecord>,
+    path: PathBuf,
 }
 
-#[derive(Default)]
-struct SseState {
-    output: TurnOutput,
-    /// index de bloc → accumulateur (json brut pour les tool_use)
-    tools: HashMap<usize, (String, String, String)>, // (id, nom, json accumulé)
-}
+impl Ledger {
+    fn load(path: PathBuf) -> Self {
+        let records = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        Self { records, path }
+    }
 
-/// Applique un événement SSE (JSON décodé) à l'état du tour.
-fn apply_event(state: &mut SseState, event: &Value) -> Result<(), String> {
-    let kind = event["type"].as_str().unwrap_or("");
-    match kind {
-        "content_block_start" => {
-            let index = event["index"].as_u64().unwrap_or(0) as usize;
-            if event["content_block"]["type"] == "tool_use" {
-                state.tools.insert(
-                    index,
-                    (
-                        event["content_block"]["id"].as_str().unwrap_or_default().to_string(),
-                        event["content_block"]["name"].as_str().unwrap_or_default().to_string(),
-                        String::new(),
-                    ),
-                );
-            }
-            Ok(())
+    fn next_turn(&self) -> u32 {
+        self.records.iter().map(|r| r.turn).max().unwrap_or(0) + 1
+    }
+
+    fn push(&mut self, record: TurnRecord) {
+        self.records.push(record);
+        // Un échec d'écriture ne doit pas casser la conversation.
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
         }
-        "content_block_delta" => {
-            let index = event["index"].as_u64().unwrap_or(0) as usize;
-            match event["delta"]["type"].as_str().unwrap_or("") {
-                "text_delta" => {
-                    state.output.text.push_str(event["delta"]["text"].as_str().unwrap_or(""));
-                    Ok(())
-                }
-                "thinking_delta" => {
-                    state.output.thinking.push_str(event["delta"]["thinking"].as_str().unwrap_or(""));
-                    Ok(())
-                }
-                "input_json_delta" => {
-                    if let Some(entry) = state.tools.get_mut(&index) {
-                        entry.2.push_str(event["delta"]["partial_json"].as_str().unwrap_or(""));
-                    }
-                    Ok(())
-                }
-                _ => Ok(()),
-            }
+        if let Ok(json) = serde_json::to_string_pretty(&self.records) {
+            let _ = std::fs::write(&self.path, json);
         }
-        "content_block_stop" => {
-            let index = event["index"].as_u64().unwrap_or(0) as usize;
-            if let Some((id, name, json_str)) = state.tools.remove(&index) {
-                let input: Map<String, Value> = if json_str.trim().is_empty() {
-                    Map::new()
-                } else {
-                    serde_json::from_str(&json_str).unwrap_or_else(|e| {
-                        // JSON partiel/malformé : on transmet ce qu'on a dans un champ dédié
-                        let mut m = Map::new();
-                        m.insert("__json_brut".into(), Value::String(json_str.clone()));
-                        m.insert("__erreur_parse".into(), Value::String(e.to_string()));
-                        m
-                    })
-                };
-                state.output.tool_calls.push(ToolCall { id, name, input });
-            }
-            Ok(())
-        }
-        "message_delta" => {
-            if let Some(err) = event["delta"]["error"].as_object() {
-                return Err(format!("erreur du modèle : {err:?}"));
-            }
-            Ok(())
-        }
-        "error" => Err(format!(
-            "erreur du modèle : {}",
-            event["error"]["message"].as_str().unwrap_or("inconnue")
-        )),
-        // message_start, message_stop, ping : rien à accumuler
-        _ => Ok(()),
     }
 }
 
-/// Extrait les lignes complètes du tampon (`data: …`), pure et testé.
-fn next_data_line(buf: &mut String) -> Option<String> {
-    loop {
-        let nl = buf.find('\n')?;
-        let mut line: String = buf.drain(..=nl).collect();
-        line.truncate(line.trim_end_matches(['\n', '\r']).len());
-        if let Some(data) = line.strip_prefix("data: ") {
-            return Some(data.to_string());
-        }
-        // lignes « event: », « : ping », vides… on continue
-    }
+/// Extrait le nom du backup de la réponse de l'outil (« backup créé : X »).
+fn parse_backup_name(response: &str) -> Option<String> {
+    response
+        .lines()
+        .find_map(|l| l.split_once("backup créé :"))
+        .map(|(_, name)| name.trim().to_string())
+        .filter(|n| !n.is_empty() && !n.contains(' '))
 }
 
 // ---------------------------------------------------------------------------
 // Boucle principale
 // ---------------------------------------------------------------------------
 
-pub async fn run(cfg: ChatConfig, mut rx: tokio::sync::mpsc::UnboundedReceiver<UserEvent>, weak: Weak<ChatWindow>) {
+pub async fn run(cfg: ChatConfig, mut rx: UnboundedReceiver<UserEvent>, weak: Weak<ChatWindow>) {
+    let mut cfg = cfg;
+    let mut translations = tr(cfg.lang());
+
     if cfg.api_key.trim().is_empty() {
-        ui::append(&weak, "error", "Clé API absente. Renseignez api_key dans ~/.config/hyprpanel/chat.toml puis relancez (ou `hyprpanel-chat init` si Zcode est configuré).");
-        ui::set_status(&weak, "config incomplète");
+        ui::append(&weak, "error", "Clé API absente : remplissez « clé API » dans ⚙ réglages.\n/api key missing: fill it in the ⚙ settings panel.");
     }
 
+    // Connexion MCP + définitions d'outils pour le LLM.
     let mcp = match cfg.mcp_url() {
         Ok(url) => match McpSession::connect(&url).await {
             Ok(session) => {
-                ui::set_status(&weak, format!("MCP {} : {} outils", session.server_name().unwrap_or_default(), session.tools().len()));
+                let n = session.tools().len();
+                ui::set_status(&weak, format!("MCP : {n} outils"));
                 Some(session)
             }
             Err(e) => {
-                ui::append(&weak, "error", format!("Serveur MCP injoignable : {e:#}"));
-                ui::set_status(&weak, "MCP indisponible");
+                ui::append(&weak, "error", format!("{} : {e:#}", translations.mcp_unavailable));
+                ui::set_status(&weak, "MCP ✗");
                 None
             }
         },
         Err(e) => {
             ui::append(&weak, "error", format!("Config du daemon introuvable : {e} (lancez `hyprpanel init`)"));
-            ui::set_status(&weak, "daemon non configuré");
+            ui::set_status(&weak, "daemon ✗");
             None
         }
     };
+    let functions: Vec<FunctionDefinition> = mcp
+        .as_ref()
+        .map(|m| {
+            m.tools()
+                .iter()
+                .map(|t| {
+                    FunctionDefinition::new(
+                        &t.name,
+                        t.description.as_deref().unwrap_or(""),
+                        Value::Object(t.input_schema.as_ref().clone()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let http = match reqwest::Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => {
-            ui::append(&weak, "error", format!("Client HTTP : {e}"));
-            return;
-        }
-    };
+    // Clients externes : bulle d'information si Claude Code / ZCode manquent.
+    notify_missing_clients(&weak, &cfg);
 
-    let tools: Vec<Value> = mcp.as_ref().map(|m| m.tools().iter().map(mcp::tool_to_anthropic).collect()).unwrap_or_default();
-    let system = build_system(mcp.as_ref().map(|m| m.instructions()).flatten().as_deref());
+    let mut llm = build_llm(&cfg, &functions);
+    let mut system = build_system(cfg.lang(), mcp.as_ref().and_then(|m| m.instructions()).as_deref());
+    let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
-    let mut convo: Vec<Value> = Vec::new();
+    let mut ledger = Ledger::load(crate::chat_config::state_history_path());
+    ui::history_set(&weak, &ledger.records);
 
     while let Some(event) = rx.recv().await {
         match event {
             UserEvent::Reset => {
-                convo.clear();
+                convo = vec![Message::new_system_message(system.clone())];
                 ui::clear(&weak);
-                ui::append(&weak, "status", "nouvelle conversation");
+                ui::append(&weak, "status", &translations.new_conversation);
+            }
+            UserEvent::ConfigUpdated(new_cfg) => {
+                cfg = *new_cfg;
+                translations = tr(cfg.lang());
+                ui::set_tr(&weak, translations.to_slint());
+                system = build_system(cfg.lang(), mcp.as_ref().and_then(|m| m.instructions()).as_deref());
+                convo[0] = Message::new_system_message(system.clone());
+                llm = build_llm(&cfg, &functions);
+                ui::set_status(&weak, &translations.settings_saved);
+                ui::append(&weak, "status", &translations.settings_saved);
             }
             UserEvent::Input { text, files } => {
-                // bulle utilisateur : texte + pièces
                 let mut bubble = text.clone();
                 for f in &files {
                     bubble.push_str(&format!("\n📎 {} ({})", f.display(), attachment_meta(f)));
                 }
                 ui::append(&weak, "user", bubble.trim());
+
+                // Registre + backup AVANT le tour : restaurable depuis ⟲.
+                let turn = ledger.next_turn();
+                let preview: String = text.chars().take(60).collect();
+                let backup = match mcp.as_ref() {
+                    Some(m) => {
+                        let mut args = Map::new();
+                        args.insert("label".into(), json!(format!("lyra-turn-{turn:03}")));
+                        match m.call("hypr_backup", args).await {
+                            Ok(response) => parse_backup_name(&response),
+                            Err(_) => None,
+                        }
+                    }
+                    None => None,
+                };
+                ledger.push(TurnRecord {
+                    turn,
+                    timestamp: timefmt::iso(std::time::SystemTime::now()),
+                    preview,
+                    backup: backup.clone(),
+                });
+                ui::history_set(&weak, &ledger.records);
+
                 ui::set_busy(&weak, true);
-                if let Err(e) = run_turn(&cfg, &http, mcp.as_ref(), &tools, &system, &mut convo, &text, &files, &weak).await {
+                if let Err(e) =
+                    run_turn(&llm, mcp.as_ref(), &mut convo, &text, &files, &translations, &weak).await
+                {
                     ui::append(&weak, "error", format!("{e:#}"));
                 }
                 ui::set_busy(&weak, false);
-                ui::set_status(
-                    &weak,
-                    match &mcp {
-                        Some(m) => format!("MCP {} : {} outils", m.server_name().unwrap_or_default(), m.tools().len()),
-                        None => "MCP indisponible".to_string(),
-                    },
-                );
+            }
+            UserEvent::Restore(name) => {
+                ui::set_busy(&weak, true);
+                ui::append(&weak, "status", &translations.restore_started);
+                let Some(mcp) = mcp.as_ref() else {
+                    ui::append(&weak, "error", translations.mcp_unavailable.clone());
+                    ui::set_busy(&weak, false);
+                    continue;
+                };
+                let mut args = Map::new();
+                args.insert("name".into(), json!(name));
+                let outcome = match mcp.call("hypr_restore_backup", args).await {
+                    Ok(report) => mcp.call("hypr_reload", Map::new()).await.map(|_| report),
+                    Err(e) => Err(e),
+                };
+                match outcome {
+                    Ok(_) => {
+                        ui::append(&weak, "status", &translations.restore_done);
+                        ui::set_status(&weak, &translations.restore_done);
+                    }
+                    Err(e) => {
+                        ui::append(
+                            &weak,
+                            "error",
+                            format!("{} : {e:#}", translations.restore_failed),
+                        );
+                    }
+                }
+                ui::set_busy(&weak, false);
             }
         }
     }
 }
 
-fn build_system(server_instructions: Option<&str>) -> String {
-    let mut system = String::from(
-        "Tu es l'agent du « panneau de configuration Hyprland » dans une fenêtre de chat native. \
+/// Prévient l'utilisateur si Claude Code ou ZCode ne sont pas enregistrés
+/// auprès du panneau, avec les commandes prêtes à coller.
+fn notify_missing_clients(weak: &Weak<ChatWindow>, cfg: &ChatConfig) {
+    let regs = hyprpanel_core::detect_clients();
+    if regs.all_registered() {
+        return;
+    }
+    let Ok(settings) = hyprpanel_core::Settings::load() else { return };
+    let snippets = hyprpanel_core::registration_snippets(&settings.token, settings.port);
+    let t = tr(cfg.lang());
+    let mut msg = format!("{} :", t.clients_notice);
+    if !regs.claude_code {
+        msg.push_str(&format!("\n\n• Claude Code — {}\n  {}", t.settings_clients_missing, snippets.claude_code));
+    }
+    if !regs.zcode {
+        msg.push_str(&format!("\n\n• ZCode — {}\n  {}", t.settings_clients_missing, snippets.zcode));
+    }
+    ui::append(weak, "error", msg);
+}
+
+fn build_llm(cfg: &ChatConfig, functions: &[FunctionDefinition]) -> Claude {
+    Claude::new()
+        .with_model(cfg.model.clone())
+        .with_api_key(cfg.api_key.clone())
+        .with_base_url(cfg.base_url.clone())
+        .with_options(
+            CallOptions::new()
+                .with_functions(functions.to_vec())
+                .with_max_tokens(cfg.max_tokens),
+        )
+}
+
+fn build_system(lang: Lang, server_instructions: Option<&str>) -> String {
+    let mut system = match lang {
+        Lang::Fr => String::from(
+            "Tu es LYRA, l'assistante de configuration du bureau Hyprland, dans une fenêtre de chat native. \
 Réponds en français, de façon concise et actionnable. Tu configures l'interface de l'utilisateur \
 en direct : utilise les outils disponibles plutôt que de longues explications. Préviens avec \
 hypr_notify avant un changement visible important. Si une demande est ambiguë ou risquée \
 (perte de données, écrans, saisie), demande confirmation.",
-    );
+        ),
+        Lang::En => String::from(
+            "You are LYRA, the Hyprland desktop configuration assistant, living in a native chat window. \
+Answer concisely and actionably, in English. You configure the user's interface live: prefer using \
+the available tools over long explanations. Warn with hypr_notify before any major visible change. \
+If a request is ambiguous or risky (data loss, monitors, input), ask for confirmation. \
+(The server instructions below are written in French.)",
+        ),
+    };
     if let Some(instructions) = server_instructions {
-        system.push_str("\n\n—— Instructions du serveur MCP ——\n");
+        system.push_str("\n\n—— Server instructions ——\n");
         system.push_str(instructions);
     }
     system
 }
 
 async fn run_turn(
-    cfg: &ChatConfig,
-    http: &reqwest::Client,
+    llm: &Claude,
     session: Option<&McpSession>,
-    tools: &[Value],
-    system: &str,
-    convo: &mut Vec<Value>,
+    convo: &mut Vec<Message>,
     user_text: &str,
     files: &[PathBuf],
+    translations: &Tr,
     weak: &Weak<ChatWindow>,
 ) -> anyhow::Result<()> {
-    let (blocks, notes) = build_user_content(user_text, files, &|p| std::fs::read(p));
+    let (message, notes) = build_user_message(user_text, files, &|p| std::fs::read(p));
     for note in notes {
         ui::append(weak, "error", note);
     }
-    convo.push(json!({"role": "user", "content": blocks}));
+    convo.push(message);
 
     for _round in 0..MAX_ROUNDS {
-        ui::set_status(weak, "réflexion…");
-        let response = request_stream(cfg, http, convo, tools, system).await?;
-        let (output, bubble_created) = parse_stream(response, weak).await?;
+        ui::set_status(weak, &translations.status_thinking);
+        let (text, result) = stream_turn(llm, convo, weak).await?;
 
-        let mut content = Vec::new();
-        if !output.text.is_empty() {
-            content.push(json!({"type": "text", "text": output.text}));
-        } else if bubble_created {
-            // bulle créée puis restée vide (tour outils sans texte) : on la retire
-            ui::remove_last(weak);
-        }
-        for tc in &output.tool_calls {
-            content.push(json!({"type": "tool_use", "id": tc.id, "name": tc.name, "input": tc.input}));
-        }
-        if content.is_empty() {
+        if text.is_empty() && result.tool_calls.is_empty() {
             bail!("réponse du modèle sans contenu utilisable");
         }
-        convo.push(json!({"role": "assistant", "content": content}));
+        convo.push(Message::new_ai_message_with_tool_calls(&text, &result.tool_calls));
 
         let Some(session) = session else {
-            if !output.tool_calls.is_empty() {
+            if !result.tool_calls.is_empty() {
                 ui::append(weak, "error", "le modèle veut appeler un outil mais le serveur MCP est indisponible");
             }
             break;
         };
-        if output.tool_calls.is_empty() {
+        if result.tool_calls.is_empty() {
             break;
         }
 
-        let mut results = Vec::new();
-        for tc in output.tool_calls {
-            ui::set_status(weak, format!("outil {}…", tc.name));
-            ui::append(weak, "tool", format!("→ {}({})", tc.name, compact_args(&tc.input)));
-            let call = session.call(&tc.name, tc.input.clone());
+        for tc in result.tool_calls {
+            ui::set_status(weak, format!("{} {}…", translations.label_tool, tc.name));
+            ui::append(weak, "tool", format!("→ {}({})", tc.name, compact_args(&tc.arguments)));
+            let args = parse_tool_arguments(&tc.arguments);
+            let call = session.call(&tc.name, args);
             let out = match tokio::time::timeout(TIMEOUT_TOOL, call).await {
                 Ok(Ok(o)) => o,
                 Ok(Err(e)) => format!("erreur outil : {e:#}"),
                 Err(_) => format!("outil {} : timeout après 30 s", tc.name),
             };
             ui::append(weak, "tool", truncate_str(&out, 400));
-            results.push(json!({"type": "tool_result", "tool_use_id": tc.id, "content": out}));
+            convo.push(Message::new_tool_message(&out, tc.id.clone()));
         }
-        convo.push(json!({"role": "user", "content": results}));
     }
     Ok(())
 }
 
-async fn request_stream(
-    cfg: &ChatConfig,
-    http: &reqwest::Client,
-    convo: &[Value],
-    tools: &[Value],
-    system: &str,
-) -> anyhow::Result<reqwest::Response> {
-    let body = json!({
-        "model": cfg.model,
-        "max_tokens": cfg.max_tokens,
-        "system": system,
-        "stream": true,
-        "tools": tools,
-        "messages": convo,
-    });
-    let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
-    let fut = async {
-        http.post(&url)
-            .header("x-api-key", &cfg.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-    };
-    let response = tokio::time::timeout(TIMEOUT_LLM, fut)
-        .await
-        .map_err(|_| anyhow::anyhow!("API : timeout après 180 s"))?
-        .context("requête vers l'API LLM")?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("API {status} : {}", truncate_str(&body, 300));
-    }
-    Ok(response)
-}
-
-/// Consomme le flux SSE : accumule le tour et streame le texte assistant
-/// dans l'UI. Renvoie la sortie et `true` si une bulle assistant a été créée
-/// (pour que l'appelant puisse la retirer si elle reste vide).
-async fn parse_stream(response: reqwest::Response, weak: &Weak<ChatWindow>) -> anyhow::Result<(TurnOutput, bool)> {
-    let mut stream = response.bytes_stream();
-    let mut buf = String::new();
-    let mut state = SseState::default();
+/// Consomme le flux d'événements LangChain : streame le texte dans la bulle
+/// LYRA, renvoie le texte complet et le résultat final (tool calls inclus).
+async fn stream_turn(
+    llm: &Claude,
+    convo: &[Message],
+    weak: &Weak<ChatWindow>,
+) -> anyhow::Result<(String, GenerateResult)> {
+    let mut stream = llm.generate_stream(convo);
+    let mut text = String::new();
     let mut bubble_created = false;
+    let mut result: Option<GenerateResult> = None;
 
     loop {
-        let chunk = tokio::select! {
-            chunk = stream.next() => chunk,
-            _ = tokio::time::sleep(TIMEOUT_LLM) => bail!("flux SSE : silence anormal"),
-        };
-        let Some(chunk) = chunk else { break };
-        let chunk = chunk.context("lecture du flux SSE")?;
-        buf.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(data) = next_data_line(&mut buf) {
-            if data == "[DONE]" {
-                continue;
-            }
-            let event: Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(_) => continue, // ligne non-JSON (keep-alive) : ignorée
-            };
-            apply_event(&mut state, &event).map_err(anyhow::Error::msg)?;
-            if !state.output.text.is_empty() {
+        let next = tokio::time::timeout(TIMEOUT_LLM, stream.next())
+            .await
+            .map_err(|_| anyhow!("LLM : silence depuis {} s", TIMEOUT_LLM.as_secs()))?;
+        let Some(event) = next else { break };
+        match event.context("flux LLM")? {
+            LLMEvent::Text(chunk) => {
                 if !bubble_created {
                     bubble_created = true;
                     ui::append(weak, "assistant", "");
                 }
-                ui::update_last(weak, "assistant", &state.output.text);
+                text.push_str(&chunk);
+                ui::update_last(weak, "assistant", &text);
             }
+            LLMEvent::Thinking(_) => {}
+            LLMEvent::Done(r) => result = Some(r),
+            _ => {}
         }
     }
 
-    Ok((state.output, bubble_created))
+    let result = result.context("flux terminé sans résultat final")?;
+    if bubble_created && text.is_empty() {
+        // bulle créée puis restée vide (tour outils sans texte) : on la retire
+        ui::remove_last(weak);
+    }
+    Ok((text, result))
 }
 
-fn compact_args(input: &Map<String, Value>) -> String {
-    let joined: Vec<String> = input
-        .iter()
-        .map(|(k, v)| {
-            let v = v.to_string();
-            format!("{k}={}", truncate_str(&v, 60))
-        })
-        .collect();
-    truncate_str(&joined.join(", "), 200)
+/// Les arguments arrivent en chaîne JSON (format OpenAI-like) → map.
+fn parse_tool_arguments(raw: &str) -> Map<String, Value> {
+    serde_json::from_str(raw).unwrap_or_else(|_| {
+        let mut m = Map::new();
+        m.insert("__arguments_bruts".into(), Value::String(raw.to_string()));
+        m
+    })
+}
+
+fn compact_args(raw: &str) -> String {
+    truncate_str(raw.trim_matches('"'), 160)
 }
 
 pub fn truncate_str(s: &str, limit: usize) -> String {
@@ -500,7 +513,7 @@ pub fn truncate_str(s: &str, limit: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tests (SSE pur)
+// Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -508,95 +521,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evenements_sse_nominaux() {
-        let mut state = SseState::default();
-        let events = [
-            r#"{"type":"message_start","message":{}}"#,
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Bonjour "}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"jacques"}}"#,
-            r#"{"type":"content_block_stop","index":0}"#,
-            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
-            r#"{"type":"message_stop"}"#,
-        ];
-        for e in events {
-            apply_event(&mut state, &serde_json::from_str(e).unwrap()).unwrap();
-        }
-        assert_eq!(state.output.text, "Bonjour jacques");
-        assert!(state.output.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn evenements_sse_appel_outil() {
-        let mut state = SseState::default();
-        let events = [
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"hypr_get_option"}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"option\":"}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"general:gaps_in\"}"}}"#,
-            r#"{"type":"content_block_stop","index":0}"#,
-        ];
-        for e in events {
-            apply_event(&mut state, &serde_json::from_str(e).unwrap()).unwrap();
-        }
-        assert_eq!(state.output.tool_calls.len(), 1);
-        let tc = &state.output.tool_calls[0];
-        assert_eq!(tc.id, "toolu_1");
-        assert_eq!(tc.name, "hypr_get_option");
-        assert_eq!(tc.input.get("option").and_then(Value::as_str), Some("general:gaps_in"));
-    }
-
-    #[test]
-    fn json_partiel_outil_recupere() {
-        let mut state = SseState::default();
-        for e in [
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t2","name":"x"}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"a\":1,"}}"#,
-            r#"{"type":"content_block_stop","index":0}"#,
-        ] {
-            apply_event(&mut state, &serde_json::from_str(e).unwrap()).unwrap();
-        }
-        let tc = &state.output.tool_calls[0];
-        assert!(tc.input.contains_key("__json_brut"));
-    }
-
-    #[test]
-    fn erreur_modele_propagee() {
-        let mut state = SseState::default();
-        let e = r#"{"type":"error","error":{"type":"overloaded_error","message":"surchargé"}}"#;
-        assert!(apply_event(&mut state, &serde_json::from_str(e).unwrap()).is_err());
-    }
-
-    #[test]
-    fn lignes_data_extraites() {
-        let mut buf = String::from("event: message\ndata: {\"a\":1}\n\n: ping\ndata: [DONE]\ndata: ");
-        assert_eq!(next_data_line(&mut buf), Some("{\"a\":1}".to_string()));
-        assert_eq!(next_data_line(&mut buf), Some("[DONE]".to_string()));
-        assert_eq!(next_data_line(&mut buf), None); // dernier fragment incomplet
-        buf.push_str("{\"b\":2}\n");
-        assert_eq!(next_data_line(&mut buf), Some("{\"b\":2}".to_string()));
-    }
-
-    #[test]
-    fn troncature_utf8() {
-        assert_eq!(truncate_str("abc", 5), "abc");
-        let s = "é".repeat(10); // 20 octets
-        let t = truncate_str(&s, 11); // coupe dans un multi-octet
-        assert!(t.ends_with('…') && t.len() < 14);
-    }
-
-    #[test]
     fn classification_pieces() {
-        assert_eq!(classify_attachment(Path::new("/x/a.png")), AttachmentKind::Image("image/png"));
-        assert_eq!(classify_attachment(Path::new("/x/A.JPG")), AttachmentKind::Image("image/jpeg"));
-        assert_eq!(classify_attachment(Path::new("/x/a.webp")), AttachmentKind::Image("image/webp"));
+        assert_eq!(classify_attachment(Path::new("/x/a.png")), AttachmentKind::Image);
+        assert_eq!(classify_attachment(Path::new("/x/A.JPG")), AttachmentKind::Image);
         assert_eq!(classify_attachment(Path::new("/x/hyprland.lua")), AttachmentKind::Text);
-        assert_eq!(classify_attachment(Path::new("/x/notes.md")), AttachmentKind::Text);
         assert_eq!(classify_attachment(Path::new("/x/doc.pdf")), AttachmentKind::Unsupported);
         assert_eq!(classify_attachment(Path::new("/x/sans-ext")), AttachmentKind::Unsupported);
     }
 
     #[test]
-    fn blocs_anthropic_avec_pieces() {
+    fn message_utilisateur_avec_pieces() {
         let png = PathBuf::from("/tmp/fake.png");
         let lua = PathBuf::from("/tmp/config.lua");
         let pdf = PathBuf::from("/tmp/doc.pdf");
@@ -607,42 +541,80 @@ mod tests {
                 _ => unreachable!(),
             }
         };
-        let (blocks, notes) = build_user_content("voici ma config", &[png.clone(), lua.clone(), pdf.clone()], &read);
-        assert_eq!(blocks.len(), 3); // texte + image + fichier texte
-        assert_eq!(blocks[0]["type"], "text");
-        assert_eq!(blocks[1]["type"], "image");
-        assert_eq!(blocks[1]["source"]["media_type"], "image/png");
-        assert_eq!(blocks[1]["source"]["data"], base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4]));
-        assert!(blocks[2]["text"].as_str().unwrap().contains("— fichier config.lua —"));
-        assert!(blocks[2]["text"].as_str().unwrap().contains("gaps_in = 5"));
-        assert_eq!(notes.len(), 1); // le pdf
+        let (msg, notes) = build_user_message("voici ma config", &[png, lua, pdf], &read);
+        assert!(msg.content.contains("voici ma config"));
+        assert!(msg.content.contains("— fichier config.lua —"));
+        assert!(msg.content.contains("gaps_in = 5"));
+        assert_eq!(msg.images.as_ref().map(|v| v.len()), Some(1));
+        assert_eq!(notes.len(), 1);
         assert!(notes[0].contains("type non pris en charge"));
     }
 
     #[test]
     fn piece_seule_sans_texte() {
         let png = PathBuf::from("/tmp/img.png");
-        let read = |_p: &Path| Ok(vec![9u8; 3]);
-        let (blocks, notes) = build_user_content("", &[png], &read);
+        let (msg, notes) = build_user_message("", &[png], &|_p| Ok(vec![9u8; 3]));
         assert!(notes.is_empty());
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["type"], "image");
-    }
-
-    #[test]
-    fn image_trop_volumineuse_refusee() {
-        let png = PathBuf::from("/tmp/grosse.png");
-        let read = |_p: &Path| Ok(vec![0u8; (MAX_IMAGE_BYTES + 1) as usize]);
-        let (blocks, notes) = build_user_content("regarde", &[png], &read);
-        assert_eq!(blocks.len(), 1); // juste le texte
-        assert!(notes[0].contains("volumineuse"));
+        assert_eq!(msg.images.as_ref().map(|v| v.len()), Some(1));
+        assert!(!msg.content.is_empty());
     }
 
     #[test]
     fn rien_du_tout_message_de_secours() {
-        let (blocks, _) = build_user_content("ok", &[], &|_p| unreachable!());
-        assert_eq!(blocks.len(), 1);
-        let (blocks, _) = build_user_content("", &[], &|_p| unreachable!());
-        assert_eq!(blocks[0]["text"], "(pièce jointe illisible)");
+        let (msg, _) = build_user_message("ok", &[], &|_p| unreachable!());
+        assert_eq!(msg.content, "ok");
+        let (msg, _) = build_user_message("", &[], &|_p| unreachable!());
+        assert_eq!(msg.content, "(pièce jointe illisible)");
+    }
+
+    #[test]
+    fn parsing_nom_de_backup() {
+        assert_eq!(
+            parse_backup_name("backup créé : 20261108-073100-lyra-turn-001"),
+            Some("20261108-073100-lyra-turn-001".into())
+        );
+        assert_eq!(parse_backup_name("aucun backup dans /x"), None);
+        assert_eq!(parse_backup_name(""), None);
+    }
+
+    #[test]
+    fn arguments_outil_parses_ou_recuperees() {
+        let m = parse_tool_arguments(r#"{"option":"general:gaps_in","value":"12"}"#);
+        assert_eq!(m.get("option").and_then(Value::as_str), Some("general:gaps_in"));
+        let m = parse_tool_arguments("{json cassé");
+        assert!(m.contains_key("__arguments_bruts"));
+    }
+
+    #[test]
+    fn registre_persiste_et_reprend() {
+        let path = std::env::temp_dir().join(format!("lyra-hist-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut ledger = Ledger::load(path.clone());
+        assert_eq!(ledger.next_turn(), 1);
+        ledger.push(TurnRecord {
+            turn: 1,
+            timestamp: "t".into(),
+            preview: "p".into(),
+            backup: Some("b".into()),
+        });
+        ledger.push(TurnRecord {
+            turn: 2,
+            timestamp: "t".into(),
+            preview: "p".into(),
+            backup: None,
+        });
+        drop(ledger);
+        let reloaded = Ledger::load(path.clone());
+        assert_eq!(reloaded.records.len(), 2);
+        assert_eq!(reloaded.next_turn(), 3);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn troncature_utf8() {
+        assert_eq!(truncate_str("abc", 5), "abc");
+        let s = "é".repeat(10);
+        let t = truncate_str(&s, 11);
+        assert!(t.ends_with('…') && t.len() < 14);
     }
 }

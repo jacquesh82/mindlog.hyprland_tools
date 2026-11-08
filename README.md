@@ -78,6 +78,21 @@ badge pill), fenêtre où l'on discute directement avec le panneau.
   sont exposés au LLM ; les appels et résultats s'affichent en bulles « outil ».
 - System prompt = règles de chat + instructions du serveur reçues au handshake.
 
+### Interface complète (v2.2)
+
+- **Accueil** avec explication et exemples cliquables ; **aide** (?), **à propos**,
+  **réglages** (⚙ : langue FR/EN, modèle, endpoint, tokens, clé, statut des clients
+  externes) — bulle d'information si Claude Code ou ZCode n'est pas enregistré
+  (commandes prêtes à coller ; `hyprpanel check` affiche aussi ce statut).
+- **i18n FR/EN** : interface, prompt système et exemples (`language` dans chat.toml).
+- **Historique de configuration** (⟲) : une sauvegarde précède chaque message
+  (`lyra-turn-NNN` via hypr_backup) ; « restaurer » remet la config Hyprland à
+  l'état d'avant un prompt donné (hypr_restore_backup + reload). Registre persistant
+  dans ~/.local/state/hyprpanel/lyra-history.json.
+- **Agent sur LangChain Rust** (module claude) : transport SSE, tool use natif et
+  messages multimodaux portés par le crate — la boucle d'exécution (streaming UI,
+  pont MCP, timeouts) reste locale.
+
 ### Envoi de fichiers
 
 Bouton **« ＋ fichier »** (sélecteur `zenity`, sélection multiple) ; les pièces

@@ -14,8 +14,8 @@ path = "src/main.rs"
 hyprpanel-core = { path = "../hyprpanel-core" }
 rmcp = { version = "3", default-features = false, features = ["client", "transport-streamable-http-client-reqwest"] }
 slint = "1.18"
-# TLS rustls pour l'API LLM (le reqwest de rmcp est sans TLS, réservé au MCP local)
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+# Le transport LLM (HTTPS, SSE) est porté par langchain-rust ; le reqwest de
+# rmcp reste sans TLS, réservé au MCP local.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -23,6 +23,7 @@ toml.workspace = true
 anyhow = "1"
 base64 = "0.22"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+langchain-rust = "8.0.0"
 
 [build-dependencies]
 slint-build = "1.18"
