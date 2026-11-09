@@ -170,6 +170,20 @@ pub struct Tr {
     pub new_conversation: String,
     pub mcp_unavailable: String,
     pub mcp_tools: String,
+    // terminal (hyprpanel-chat cli)
+    pub cli_banner: String,
+    pub cli_help: String,
+    pub cli_yes_no: String,
+    pub cli_command_prompt: String,
+    pub cli_noninteractive: String,
+    pub cli_choice_hint: String,
+    pub cli_attached: String,
+    pub cli_attachments_none: String,
+    pub cli_attachments_cleared: String,
+    pub cli_attach_missing: String,
+    pub cli_history_empty: String,
+    pub cli_unknown_command: String,
+    pub cli_restore_usage: String,
 }
 
 pub fn tr(lang: Lang) -> Tr {
@@ -384,6 +398,19 @@ fn french() -> Tr {
         new_conversation: "nouvelle conversation".into(),
         mcp_unavailable: "Serveur MCP hyprpanel injoignable".into(),
         mcp_tools: "MCP : {} outils".into(),
+        cli_banner: "LYRA {} · {} — /help pour les commandes, Ctrl+D pour quitter".into(),
+        cli_help: "Commandes\n  /help              cette aide\n  /new               nouvelle conversation\n  /attach <fichier>  joint un fichier au prochain message (/attach seul : liste)\n  /detach            retire les pièces jointes en attente\n  /history           tours récents et sauvegardes\n  /restore <nom>     restaure une sauvegarde puis recharge Hyprland\n  /refresh           actualise le profil de l’environnement\n  /quit              quitter (ou Ctrl+D)\nUn numéro seul répond à la dernière proposition de choix.".into(),
+        cli_yes_no: "[o/N]".into(),
+        cli_command_prompt: "Exécuter ?".into(),
+        cli_noninteractive: "Entrée non interactive : refusé par défaut.".into(),
+        cli_choice_hint: "Tapez le numéro d’un choix, ou répondez librement.".into(),
+        cli_attached: "Joint au prochain message : {}".into(),
+        cli_attachments_none: "Aucune pièce jointe en attente.".into(),
+        cli_attachments_cleared: "Pièces jointes retirées.".into(),
+        cli_attach_missing: "Fichier introuvable : {}".into(),
+        cli_history_empty: "Aucun tour enregistré.".into(),
+        cli_unknown_command: "Commande inconnue : {} — /help pour l’aide.".into(),
+        cli_restore_usage: "Usage : /restore <sauvegarde> (voir /history).".into(),
     }
 }
 
@@ -518,6 +545,19 @@ fn english() -> Tr {
         new_conversation: "new conversation".into(),
         mcp_unavailable: "hyprpanel MCP server unreachable".into(),
         mcp_tools: "MCP: {} tools".into(),
+        cli_banner: "LYRA {} · {} — /help for commands, Ctrl+D to quit".into(),
+        cli_help: "Commands\n  /help              this help\n  /new               new conversation\n  /attach <file>     attach a file to the next message (/attach alone: list)\n  /detach            drop pending attachments\n  /history           recent turns and snapshots\n  /restore <name>    restore a snapshot then reload Hyprland\n  /refresh           refresh the environment profile\n  /quit              quit (or Ctrl+D)\nA bare number answers the latest choice suggestion.".into(),
+        cli_yes_no: "[y/N]".into(),
+        cli_command_prompt: "Run it?".into(),
+        cli_noninteractive: "Non-interactive input: declined by default.".into(),
+        cli_choice_hint: "Type a choice number, or answer freely.".into(),
+        cli_attached: "Attached to the next message: {}".into(),
+        cli_attachments_none: "No pending attachment.".into(),
+        cli_attachments_cleared: "Attachments dropped.".into(),
+        cli_attach_missing: "File not found: {}".into(),
+        cli_history_empty: "No recorded turn.".into(),
+        cli_unknown_command: "Unknown command: {} — /help for help.".into(),
+        cli_restore_usage: "Usage: /restore <snapshot> (see /history).".into(),
     }
 }
 
@@ -664,11 +704,14 @@ mod tests {
         for (k, v) in en.as_object().unwrap() {
             assert!(!v.as_str().unwrap().trim().is_empty(), "EN : {k} vide");
         }
-        // marqueurs {} cohérents entre langues
-        assert_eq!(
-            fr["mcp_tools"].as_str().unwrap().matches("{}").count(),
-            en["mcp_tools"].as_str().unwrap().matches("{}").count()
-        );
+        // marqueurs {} cohérents entre langues, pour chaque clé
+        for (k, v) in fr.as_object().unwrap() {
+            assert_eq!(
+                v.as_str().unwrap().matches("{}").count(),
+                en[k].as_str().unwrap().matches("{}").count(),
+                "marqueurs {{}} divergents : {k}"
+            );
+        }
     }
 
     #[test]

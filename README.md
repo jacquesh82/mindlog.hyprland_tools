@@ -127,6 +127,25 @@ without an embedding service. Relevant excerpts are included in the context sent
 to your selected provider. It starts after filesystem consent and works across
 conversations and providers.
 
+## Terminal mode
+
+The same assistant runs in a terminal, with the same subscription, tools,
+execution modes, per-turn backups and memory as the window:
+
+```bash
+hyprpanel-chat cli                         # interactive session (/help)
+hyprpanel-chat cli "list my SUPER binds"   # one turn, then exit
+echo "why is my gap ignored?" | hyprpanel-chat cli --fs -f shot.png
+```
+
+Replies stream as they are written; tool calls appear as one summary line each
+(`-v` shows full results). Choice suggestions are numbered: type a number to pick
+one. Filesystem access is asked at startup (`--fs` / `--no-fs` to answer ahead).
+Confirmations show the exact command and wait for `y`/`o`; when stdin is not a
+terminal (pipe), every confirmation is declined. Session commands: `/new`,
+`/attach`, `/detach`, `/history`, `/restore <snapshot>`, `/refresh`, `/quit`.
+A one-shot turn exits with code 1 if an error was displayed.
+
 ## Settings and backups
 
 - **⚙ Settings**: tabs for General, Access, Assistant, and Memory. Choose language, execution policy, model, SYSTEM context, and local memory preferences.

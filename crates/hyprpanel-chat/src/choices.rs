@@ -247,6 +247,48 @@ impl ChoiceRequest {
     }
 }
 
+/// Bulle visible du choix (« Je choisis « X ». »).
+pub fn choice_display(prefix: &str, label: &str) -> String {
+    format!("{prefix} « {label} ».")
+}
+
+/// Message transmis au modèle pour un choix explicite de l'utilisateur.
+pub fn choice_context(
+    question: &str,
+    id: &str,
+    label: &str,
+    value: &str,
+    colors: &[String],
+    source_url: &str,
+) -> String {
+    serde_json::json!({
+        "type": "user_choice", "question": question, "id": id,
+        "label": label, "value": value,
+        "colors": colors, "source_url": source_url,
+    })
+    .to_string()
+}
+
+impl ChoiceRequest {
+    /// Choix par position (0-based) — utilisé par la CLI ; renvoie
+    /// `(bulle visible, contexte modèle)` comme `select_choice`.
+    pub fn select(&self, index: usize, prefix: &str) -> Option<(String, String)> {
+        let option = self.options.get(index)?;
+        let colors: Vec<String> = option.colors.iter().map(|c| c.to_uppercase()).collect();
+        Some((
+            choice_display(prefix, &option.label),
+            choice_context(
+                &self.question,
+                &option.id,
+                &option.label,
+                &option.value,
+                &colors,
+                &option.source_url,
+            ),
+        ))
+    }
+}
+
 /// Une réponse écrite ou un nouveau choix ferme les propositions précédentes.
 pub fn finish_pending_choices(ui: &ChatWindow) {
     let model = ui.get_messages();
@@ -273,18 +315,20 @@ pub fn select_choice(ui: &ChatWindow, index: i32, id: &str) -> Option<(String, S
             .is_some_and(|option| option.id == id)
     })?;
     let mut option = row.choices.row_data(option_index)?;
-    let display = format!("{} « {} ».", ui.get_tr().choice_selected, option.label);
+    let display = choice_display(ui.get_tr().choice_selected.as_str(), &option.label);
     let colors: Vec<String> = option
         .swatches
         .iter()
         .map(|color| color.hex.to_string())
         .collect();
-    let context = serde_json::json!({
-        "type": "user_choice", "question": row.text.as_str(), "id": option.id.as_str(),
-        "label": option.label.as_str(), "value": option.value.as_str(),
-        "colors": colors, "source_url": option.source.as_str(),
-    })
-    .to_string();
+    let context = choice_context(
+        &row.text,
+        &option.id,
+        &option.label,
+        &option.value,
+        &colors,
+        &option.source,
+    );
     finish_pending_choices(ui);
     option.selected = true;
     row.choices.set_row_data(option_index, option);
@@ -307,6 +351,21 @@ mod tests {
             ChoiceRequest::parse(&raw.replace("<rect", "<image href='file:///etc/passwd' /><rect"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn selection_par_position_pour_la_cli() {
+        let raw = r##"{"question":"Quelle ambiance ?","options":[{"id":"cyan","label":"Cyan","value":"teal","colors":["#00adb5"]},{"id":"rose","label":"Rose"}]}"##;
+        let request = ChoiceRequest::parse(raw).unwrap();
+        let (display, context) = request.select(0, "Je choisis").unwrap();
+        assert_eq!(display, "Je choisis « Cyan ».");
+        let context: Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(context["type"], "user_choice");
+        assert_eq!(context["question"], "Quelle ambiance ?");
+        assert_eq!(context["id"], "cyan");
+        assert_eq!(context["value"], "teal");
+        assert_eq!(context["colors"], json!(["#00ADB5"]));
+        assert!(request.select(2, "Je choisis").is_none());
     }
 
     #[test]

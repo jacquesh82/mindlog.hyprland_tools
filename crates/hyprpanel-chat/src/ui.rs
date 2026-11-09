@@ -2,15 +2,40 @@
 //! `invoke_from_event_loop`. Seul le thread agent écrit dans le modèle ;
 //! le compteur `ROWS` suit donc fidèlement les indices de lignes (les
 //! opérations sont exécutées dans l'ordre par la boucle d'événements).
+//!
+//! `Front` choisit la sortie : la fenêtre Slint ou le terminal (`cli`). La
+//! boucle d'agent ne connaît que `Front` ; les fonctions de chips restent
+//! propres à la fenêtre.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use slint::{Model, ModelRc, Weak};
 
 use crate::ChatWindow;
 use crate::MessageRow;
+use crate::cli::Terminal;
 
 static ROWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Sortie de la boucle d'agent : fenêtre Slint ou terminal.
+#[derive(Clone)]
+pub enum Front {
+    Window(Weak<ChatWindow>),
+    Terminal(Arc<Terminal>),
+}
+
+impl From<&Weak<ChatWindow>> for Front {
+    fn from(weak: &Weak<ChatWindow>) -> Self {
+        Self::Window(weak.clone())
+    }
+}
+
+impl From<&Front> for Front {
+    fn from(front: &Front) -> Self {
+        front.clone()
+    }
+}
 
 fn queue(
     weak: &Weak<ChatWindow>,
@@ -29,10 +54,16 @@ fn queue(
 }
 
 /// Ajoute une bulle et renvoie son index (côté compteur logique).
-pub fn append(weak: &Weak<ChatWindow>, kind: &str, text: impl Into<String>) -> usize {
+pub fn append(front: impl Into<Front>, kind: &str, text: impl Into<String>) -> usize {
+    match front.into() {
+        Front::Window(weak) => window_append(&weak, kind, text.into()),
+        Front::Terminal(terminal) => terminal.append(kind, &text.into()),
+    }
+}
+
+fn window_append(weak: &Weak<ChatWindow>, kind: &str, text: String) -> usize {
     let idx = ROWS.fetch_add(1, Ordering::SeqCst);
     let kind = kind.to_string();
-    let text = text.into();
     let rich = (kind == "assistant").then(|| crate::rich_text::parse(&text));
     queue(weak, move |ui, model| {
         if kind == "user" {
@@ -52,12 +83,24 @@ pub fn append(weak: &Weak<ChatWindow>, kind: &str, text: impl Into<String>) -> u
 }
 
 /// Met à jour la dernière bulle (streaming du texte assistant).
-pub fn update_last(weak: &Weak<ChatWindow>, kind: &str, text: &str) {
-    let idx = ROWS.load(Ordering::SeqCst).saturating_sub(1);
-    set_row(weak, idx, kind, text);
+pub fn update_last(front: impl Into<Front>, kind: &str, text: &str) {
+    match front.into() {
+        Front::Window(weak) => {
+            let idx = ROWS.load(Ordering::SeqCst).saturating_sub(1);
+            window_set_row(&weak, idx, kind, text);
+        }
+        Front::Terminal(terminal) => terminal.update_last(kind, text),
+    }
 }
 
-pub fn set_row(weak: &Weak<ChatWindow>, idx: usize, kind: &str, text: &str) {
+pub fn set_row(front: impl Into<Front>, idx: usize, kind: &str, text: &str) {
+    match front.into() {
+        Front::Window(weak) => window_set_row(&weak, idx, kind, text),
+        Front::Terminal(terminal) => terminal.set_row(idx, kind, text),
+    }
+}
+
+fn window_set_row(weak: &Weak<ChatWindow>, idx: usize, kind: &str, text: &str) {
     let kind = kind.to_string();
     let text = text.to_string();
     let rich = (kind == "assistant").then(|| crate::rich_text::parse(&text));
@@ -77,7 +120,12 @@ pub fn set_row(weak: &Weak<ChatWindow>, idx: usize, kind: &str, text: &str) {
 }
 
 /// Supprime la dernière ligne (bulle restée vide après un tour outils).
-pub fn remove_last(weak: &Weak<ChatWindow>) {
+pub fn remove_last(front: impl Into<Front>) {
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.remove_last(),
+    };
+    let weak = &weak;
     let idx = ROWS.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
     queue(weak, move |_, model| {
         if idx < model.row_count() {
@@ -87,7 +135,12 @@ pub fn remove_last(weak: &Weak<ChatWindow>) {
 }
 
 /// Vide le journal (nouvelle conversation).
-pub fn clear(weak: &Weak<ChatWindow>) {
+pub fn clear(front: impl Into<Front>) {
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.clear(),
+    };
+    let weak = &weak;
     ROWS.store(0, Ordering::SeqCst);
     queue(weak, |ui, model| {
         ui.set_follow_output(true);
@@ -95,7 +148,12 @@ pub fn clear(weak: &Weak<ChatWindow>) {
     });
 }
 
-pub fn offer_choices(weak: &Weak<ChatWindow>, request: crate::choices::ChoiceRequest) {
+pub fn offer_choices(front: impl Into<Front>, request: crate::choices::ChoiceRequest) {
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.offer_choices(request),
+    };
+    let weak = &weak;
     ROWS.fetch_add(1, Ordering::SeqCst);
     queue(weak, move |ui, model| {
         crate::choices::finish_pending_choices(ui);
@@ -104,9 +162,12 @@ pub fn offer_choices(weak: &Weak<ChatWindow>, request: crate::choices::ChoiceReq
     });
 }
 
-pub fn set_status(weak: &Weak<ChatWindow>, status: impl Into<String>) {
+pub fn set_status(front: impl Into<Front>, status: impl Into<String>) {
     let status = status.into();
-    let weak = weak.clone();
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.set_status(&status),
+    };
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_status(status.into());
@@ -114,8 +175,10 @@ pub fn set_status(weak: &Weak<ChatWindow>, status: impl Into<String>) {
     });
 }
 
-pub fn set_busy(weak: &Weak<ChatWindow>, busy: bool) {
-    let weak = weak.clone();
+pub fn set_busy(front: impl Into<Front>, busy: bool) {
+    let Front::Window(weak) = front.into() else {
+        return;
+    };
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_busy(busy);
@@ -130,8 +193,11 @@ pub fn set_busy(weak: &Weak<ChatWindow>, busy: bool) {
 }
 
 /// Progression mesurée par phase ; None signifie une durée/quantité inconnue.
-pub fn set_progress(weak: &Weak<ChatWindow>, label: String, progress: Option<f32>) {
-    let weak = weak.clone();
+pub fn set_progress(front: impl Into<Front>, label: String, progress: Option<f32>) {
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.set_status(&label),
+    };
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_task_label(label.into());
@@ -141,8 +207,10 @@ pub fn set_progress(weak: &Weak<ChatWindow>, label: String, progress: Option<f32
     });
 }
 
-pub fn set_activity(weak: &Weak<ChatWindow>, activity: &str) {
-    let weak = weak.clone();
+pub fn set_activity(front: impl Into<Front>, activity: &str) {
+    let Front::Window(weak) = front.into() else {
+        return;
+    };
     let activity = activity.to_string();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -204,7 +272,11 @@ pub fn attachments_clear(weak: &Weak<ChatWindow>) {
 }
 
 /// Remplace tout l'historique (l'affichage veut l'ordre antéchronologique).
-pub fn history_set(weak: &Weak<ChatWindow>, records: &[crate::agent::TurnRecord]) {
+pub fn history_set(front: impl Into<Front>, records: &[crate::agent::TurnRecord]) {
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.history_set(records),
+    };
     let rows: Vec<crate::HistoryRow> = records
         .iter()
         .rev()
@@ -230,8 +302,12 @@ pub fn history_set(weak: &Weak<ChatWindow>, records: &[crate::agent::TurnRecord]
 }
 
 /// Remplace le dictionnaire i18n (changement de langue à chaud).
-pub fn set_tr(weak: &Weak<ChatWindow>, texts: crate::TrTexts) {
-    let weak = weak.clone();
+pub fn set_tr(front: impl Into<Front>, translations: &crate::i18n::Tr) {
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Terminal(terminal) => return terminal.set_tr(translations.clone()),
+    };
+    let texts = translations.to_slint();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
             ui.set_tr(texts);

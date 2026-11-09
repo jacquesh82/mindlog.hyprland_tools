@@ -18,12 +18,10 @@ use langchain_rust::language_models::{GenerateResult, LLMEvent, llm::LLM};
 use langchain_rust::llm::claude::Claude;
 use langchain_rust::schemas::{FunctionDefinition, ImageContent, Message};
 use serde_json::{Map, Value, json};
-use slint::Weak;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use hyprpanel_core::timefmt;
 
-use crate::ChatWindow;
 use crate::chat_config::ChatConfig;
 use crate::i18n::{Lang, Tr, tr};
 use crate::mcp::McpSession;
@@ -46,6 +44,8 @@ pub enum UserEvent {
     FilesystemChanged,
     EnvironmentRefresh,
     ClearMemory,
+    /// Barrière (CLI) : répond une fois les événements précédents traités.
+    Sync(tokio::sync::oneshot::Sender<()>),
 }
 
 const MAX_ROUNDS: usize = 12;
@@ -224,7 +224,7 @@ fn parse_backup_name(response: &str) -> Option<String> {
 pub async fn run(
     cfg: ChatConfig,
     mut rx: UnboundedReceiver<UserEvent>,
-    weak: Weak<ChatWindow>,
+    front: ui::Front,
     filesystem: Arc<crate::filesystem::FilesystemAccess>,
     approvals: crate::commands::Approvals,
 ) {
@@ -233,7 +233,7 @@ pub async fn run(
 
     if cfg.provider == crate::chat_config::Provider::Zcode && cfg.api_key.trim().is_empty() {
         ui::append(
-            &weak,
+            &front,
             "error",
             "Clé API absente : remplissez « clé API » dans ⚙ réglages.\n/api key missing: fill it in the ⚙ settings panel.",
         );
@@ -245,7 +245,7 @@ pub async fn run(
             Ok(session) => {
                 let n = session.tools().len();
                 ui::set_status(
-                    &weak,
+                    &front,
                     if filesystem.approved() {
                         translations.mcp_tools.replace("{}", &n.to_string())
                     } else {
@@ -256,27 +256,27 @@ pub async fn run(
             }
             Err(e) => {
                 ui::append(
-                    &weak,
+                    &front,
                     "error",
                     format!("{} : {e:#}", translations.mcp_unavailable),
                 );
-                ui::set_status(&weak, "MCP ✗");
+                ui::set_status(&front, "MCP ✗");
                 None
             }
         },
         Err(e) => {
             ui::append(
-                &weak,
+                &front,
                 "error",
                 format!("Config du daemon introuvable : {e} (lancez `hyprpanel init`)"),
             );
-            ui::set_status(&weak, "daemon ✗");
+            ui::set_status(&front, "daemon ✗");
             None
         }
     };
     let mut environment_ready = filesystem.approved();
     if environment_ready {
-        refresh_environment(&weak, &filesystem, &approvals, &translations).await;
+        refresh_environment(&front, &filesystem, &approvals, &translations).await;
     }
     let mut functions = available_functions(mcp.as_ref(), &filesystem);
 
@@ -285,7 +285,7 @@ pub async fn run(
     let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
     let mut ledger = Ledger::load(crate::chat_config::state_history_path());
-    ui::history_set(&weak, &ledger.records);
+    ui::history_set(&front, &ledger.records);
 
     while let Some(event) = rx.recv().await {
         let (event, choice_display) = match event {
@@ -300,14 +300,17 @@ pub async fn run(
             event => (event, None),
         };
         match event {
+            UserEvent::Sync(done) => {
+                let _ = done.send(());
+            }
             UserEvent::FilesystemChanged => {
                 if filesystem.approved() && !environment_ready {
-                    refresh_environment(&weak, &filesystem, &approvals, &translations).await;
+                    refresh_environment(&front, &filesystem, &approvals, &translations).await;
                     environment_ready = true;
                 } else {
                     if !filesystem.approved() {
                         environment_ready = false;
-                        set_environment(&weak, String::new());
+                        set_environment(&front, String::new());
                     }
                 }
                 functions = available_functions(mcp.as_ref(), &filesystem);
@@ -320,7 +323,7 @@ pub async fn run(
             }
             UserEvent::EnvironmentRefresh => {
                 if filesystem.approved() {
-                    refresh_environment(&weak, &filesystem, &approvals, &translations).await;
+                    refresh_environment(&front, &filesystem, &approvals, &translations).await;
                     system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                     convo[0] = Message::new_system_message(system.clone());
                 }
@@ -330,30 +333,30 @@ pub async fn run(
                 Ok(()) => {
                     system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                     convo = vec![Message::new_system_message(system.clone())];
-                    ui::clear(&weak);
-                    ui::set_status(&weak, &translations.memory_cleared);
+                    ui::clear(&front);
+                    ui::set_status(&front, &translations.memory_cleared);
                 }
                 Err(error) => {
-                    ui::append(&weak, "error", format!("Mémoire : {error:#}"));
+                    ui::append(&front, "error", format!("Mémoire : {error:#}"));
                 }
             },
             UserEvent::Reset => {
                 system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                 convo = vec![Message::new_system_message(system.clone())];
-                ui::clear(&weak);
-                ui::set_status(&weak, &translations.new_conversation);
+                ui::clear(&front);
+                ui::set_status(&front, &translations.new_conversation);
             }
             UserEvent::ConfigUpdated(new_cfg) => {
                 cfg = *new_cfg;
                 filesystem.set_operation_mode(cfg.operation_mode);
                 functions = available_functions(mcp.as_ref(), &filesystem);
                 translations = tr(cfg.lang());
-                ui::set_tr(&weak, translations.to_slint());
+                ui::set_tr(&front, &translations);
                 system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
                 convo[0] = Message::new_system_message(system.clone());
                 llm = build_llm(&cfg, &functions);
-                ui::set_status(&weak, &translations.settings_saved);
-                ui::append(&weak, "status", &translations.settings_saved);
+                ui::set_status(&front, &translations.settings_saved);
+                ui::append(&front, "status", &translations.settings_saved);
             }
             UserEvent::Input {
                 text,
@@ -369,15 +372,15 @@ pub async fn run(
                     &text,
                     choice_display.is_some(),
                 ) {
-                    ui::append(&weak, "error", format!("Mémoire locale : {error:#}"));
+                    ui::append(&front, "error", format!("Mémoire locale : {error:#}"));
                 }
                 let visible_text = choice_display.as_deref().unwrap_or(&text);
                 let mut bubble = visible_text.to_string();
                 for f in &files {
                     bubble.push_str(&format!("\n📎 {} ({})", f.display(), attachment_meta(f)));
                 }
-                ui::append(&weak, "user", bubble.trim());
-                ui::set_activity(&weak, "tools");
+                ui::append(&front, "user", bubble.trim());
+                ui::set_activity(&front, "tools");
                 let turn = ledger.next_turn();
                 let preview: String = visible_text.chars().take(60).collect();
                 let backup = match mcp
@@ -400,8 +403,8 @@ pub async fn run(
                     preview,
                     backup,
                 });
-                ui::history_set(&weak, &ledger.records);
-                ui::set_busy(&weak, true);
+                ui::history_set(&front, &ledger.records);
+                ui::set_busy(&front, true);
                 if let Err(e) = run_turn(
                     &cfg,
                     &functions,
@@ -411,17 +414,17 @@ pub async fn run(
                     &text,
                     &files,
                     &translations,
-                    &weak,
+                    &front,
                     &filesystem,
                     &approvals,
                 )
                 .await
                 {
-                    ui::append(&weak, "error", format!("{e:#}"));
+                    ui::append(&front, "error", format!("{e:#}"));
                 }
-                ui::set_busy(&weak, false);
+                ui::set_busy(&front, false);
                 ui::set_status(
-                    &weak,
+                    &front,
                     if !filesystem.approved() {
                         translations.fs_denied.clone()
                     } else {
@@ -436,19 +439,19 @@ pub async fn run(
             }
             UserEvent::Restore(name) => {
                 if !filesystem.operation_mode().can_operate() {
-                    ui::append(&weak, "status", &translations.operation_copy_hint);
+                    ui::append(&front, "status", &translations.operation_copy_hint);
                     continue;
                 }
                 if !filesystem.approved() {
-                    ui::append(&weak, "error", &translations.fs_denied);
+                    ui::append(&front, "error", &translations.fs_denied);
                     continue;
                 }
-                ui::set_activity(&weak, "restore");
-                ui::set_busy(&weak, true);
-                ui::append(&weak, "status", &translations.restore_started);
+                ui::set_activity(&front, "restore");
+                ui::set_busy(&front, true);
+                ui::append(&front, "status", &translations.restore_started);
                 let Some(mcp) = mcp.as_ref() else {
-                    ui::append(&weak, "error", &translations.mcp_unavailable);
-                    ui::set_busy(&weak, false);
+                    ui::append(&front, "error", &translations.mcp_unavailable);
+                    ui::set_busy(&front, false);
                     continue;
                 };
                 let mut args = Map::new();
@@ -456,7 +459,7 @@ pub async fn run(
                 if filesystem.operation_mode().confirm_desktop()
                     && !approvals
                         .request(
-                            &weak,
+                            &front,
                             format!(
                                 "hypr_restore_backup({})\nhypr_reload({{}})",
                                 Value::Object(args.clone())
@@ -465,12 +468,12 @@ pub async fn run(
                         )
                         .await
                 {
-                    ui::append(&weak, "status", &translations.command_declined);
-                    ui::set_busy(&weak, false);
+                    ui::append(&front, "status", &translations.command_declined);
+                    ui::set_busy(&front, false);
                     continue;
                 }
                 if !filesystem.allows_mcp("hypr_restore_backup") {
-                    ui::set_busy(&weak, false);
+                    ui::set_busy(&front, false);
                     continue;
                 }
                 let outcome = match mcp.call("hypr_restore_backup", args).await {
@@ -479,25 +482,27 @@ pub async fn run(
                 };
                 match outcome {
                     Ok(_) => {
-                        ui::append(&weak, "status", &translations.restore_done);
-                        ui::set_status(&weak, &translations.restore_done);
+                        ui::append(&front, "status", &translations.restore_done);
+                        ui::set_status(&front, &translations.restore_done);
                     }
                     Err(e) => {
                         ui::append(
-                            &weak,
+                            &front,
                             "error",
                             format!("{} : {e:#}", translations.restore_failed),
                         );
                     }
                 };
-                ui::set_busy(&weak, false);
+                ui::set_busy(&front, false);
             }
         }
     }
 }
 
-fn set_environment(weak: &Weak<ChatWindow>, text: String) {
-    let weak = weak.clone();
+fn set_environment(front: &ui::Front, text: String) {
+    let ui::Front::Window(weak) = front.clone() else {
+        return;
+    };
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
             app.set_environment_text(text.into());
@@ -506,20 +511,20 @@ fn set_environment(weak: &Weak<ChatWindow>, text: String) {
 }
 
 async fn refresh_environment(
-    weak: &Weak<ChatWindow>,
+    front: &ui::Front,
     filesystem: &Arc<crate::filesystem::FilesystemAccess>,
     approvals: &crate::commands::Approvals,
     translations: &Tr,
 ) {
-    ui::set_busy(weak, true);
-    ui::set_status(weak, &translations.environment_scanning);
-    ui::set_activity(weak, "tools");
+    ui::set_busy(front, true);
+    ui::set_status(front, &translations.environment_scanning);
+    ui::set_activity(front, "tools");
     let result = async {
         filesystem.require_approval()?;
         let mut profile = crate::environment::prepare(&crate::environment::path())?;
         let fs = filesystem.clone();
         let managers = profile.package_managers.clone();
-        let progress_weak = weak.clone();
+        let progress_front = front.clone();
         let progress_tr = translations.clone();
         let mut inventory = tokio::task::spawn_blocking(move || {
             let mut previous = String::new();
@@ -545,7 +550,7 @@ async fn refresh_environment(
                         None => format!("{name} · {done}"),
                     };
                     ui::set_progress(
-                        &progress_weak,
+                        &progress_front,
                         label,
                         total.map(|total| {
                             if total == 0 {
@@ -569,7 +574,7 @@ async fn refresh_environment(
             }
             filesystem.require_approval()?;
             ui::set_progress(
-                weak,
+                front,
                 format!(
                     "{} · {}/{} · {}",
                     translations.inventory_queries,
@@ -580,14 +585,14 @@ async fn refresh_environment(
                 None,
             );
             let reason = translations.environment_query.replace("{}", query.manager);
-            let confirmation = approvals.request(weak, query.command.into(), reason.clone());
+            let confirmation = approvals.request(front, query.command.into(), reason.clone());
             let request = crate::commands::Request {
                 command: query.command.into(),
                 reason,
             };
             match crate::commands::run_inventory(request, filesystem, confirmation).await {
                 Ok(output) if output["status"] == "manual_only" => {
-                    show_manual_command(weak, &output, translations);
+                    show_manual_command(front, &output, translations);
                     inventory.record(query.manager, "manual_only", Vec::new(), None);
                 }
                 Ok(output) if output["status"] == "declined" => {
@@ -629,7 +634,7 @@ async fn refresh_environment(
             }
         }
         filesystem.require_approval()?;
-        ui::set_progress(weak, translations.inventory_saving.clone(), None);
+        ui::set_progress(front, translations.inventory_saving.clone(), None);
         profile.desktop_tools = inventory.finish();
         profile.inventory_sources = inventory.sources;
         profile.inventory_limits = inventory.limits.into_iter().collect();
@@ -645,20 +650,20 @@ async fn refresh_environment(
     match result {
         Ok(profile) => {
             set_environment(
-                weak,
+                front,
                 serde_json::to_string_pretty(&profile).unwrap_or_default(),
             );
-            ui::set_status(weak, &translations.environment_refreshed);
+            ui::set_status(front, &translations.environment_refreshed);
         }
         Err(error) => {
             ui::append(
-                weak,
+                front,
                 "error",
                 format!("Profil de l’environnement : {error:#}"),
             );
         }
     };
-    ui::set_busy(weak, false);
+    ui::set_busy(front, false);
 }
 
 fn available_functions(
@@ -829,7 +834,7 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
     system
 }
 
-fn show_manual_command(weak: &Weak<ChatWindow>, output: &Value, translations: &Tr) {
+fn show_manual_command(front: &ui::Front, output: &Value, translations: &Tr) {
     let command = output["command"].as_str().unwrap_or("");
     let reason = output["reason"].as_str().unwrap_or("");
     // Le bloc utilise le bouton Copier du moteur Markdown natif.
@@ -843,7 +848,7 @@ fn show_manual_command(weak: &Weak<ChatWindow>, output: &Value, translations: &T
             .max(3),
     );
     ui::append(
-        weak,
+        front,
         "assistant",
         format!(
             "**{}**\n\n{reason}\n\n{fence}sh\n{command}\n{fence}",
@@ -861,22 +866,22 @@ async fn run_turn(
     user_text: &str,
     files: &[PathBuf],
     translations: &Tr,
-    weak: &Weak<ChatWindow>,
+    front: &ui::Front,
     filesystem: &crate::filesystem::FilesystemAccess,
     approvals: &crate::commands::Approvals,
 ) -> anyhow::Result<()> {
     cfg.validate_subscription().map_err(anyhow::Error::msg)?;
     let (message, notes) = build_user_message(user_text, files, &|p| std::fs::read(p));
     for note in notes {
-        ui::append(weak, "error", note);
+        ui::append(front, "error", note);
     }
     convo.push(message);
 
     for _round in 0..MAX_ROUNDS {
-        ui::set_activity(weak, "thinking");
-        ui::set_status(weak, &translations.status_thinking);
+        ui::set_activity(front, "thinking");
+        ui::set_status(front, &translations.status_thinking);
         let (text, result) = if cfg.provider == crate::chat_config::Provider::Zcode {
-            stream_turn(llm, convo, weak).await?
+            stream_turn(llm, convo, front).await?
         } else {
             let mut row = None;
             let mut last_flush = std::time::Instant::now();
@@ -886,22 +891,22 @@ async fn run_turn(
                 }
                 if let Some(index) = row {
                     if last_flush.elapsed() >= Duration::from_millis(33) {
-                        ui::set_row(weak, index, "assistant", partial);
+                        ui::set_row(front, index, "assistant", partial);
                         last_flush = std::time::Instant::now();
                     }
                 } else {
-                    ui::set_activity(weak, "writing");
-                    row = Some(ui::append(weak, "assistant", partial));
+                    ui::set_activity(front, "writing");
+                    row = Some(ui::append(front, "assistant", partial));
                     last_flush = std::time::Instant::now();
                 }
             })
             .await?;
             let text = result.generation.clone();
             if let Some(index) = row {
-                ui::set_row(weak, index, "assistant", &text);
+                ui::set_row(front, index, "assistant", &text);
             } else if !text.is_empty() {
-                ui::set_activity(weak, "writing");
-                ui::append(weak, "assistant", &text);
+                ui::set_activity(front, "writing");
+                ui::append(front, "assistant", &text);
             }
             (text, result)
         };
@@ -928,21 +933,21 @@ async fn run_turn(
             } else if tc.name == crate::choices::OFFER_TOOL {
                 match authorized_choices(&tc.arguments, filesystem) {
                     Ok(request) => {
-                        ui::offer_choices(weak, request);
+                        ui::offer_choices(front, request);
                         awaiting_choice = true;
                         json!({"status": "awaiting_user_choice", "instruction": "Wait for the user's click; do not choose for them."}).to_string()
                     }
                     Err(error) => json!({"error": error.to_string()}).to_string(),
                 }
             } else {
-                let row = *details_row.get_or_insert_with(|| ui::append(weak, "tool", ""));
-                ui::set_activity(weak, "tools");
-                ui::set_status(weak, &translations.status_tools);
+                let row = *details_row.get_or_insert_with(|| ui::append(front, "tool", ""));
+                ui::set_activity(front, "tools");
+                ui::set_status(front, &translations.status_tools);
                 if !details.is_empty() {
                     details.push_str("\n\n");
                 }
                 details.push_str(&format!("→ {}({})", tc.name, compact_args(&tc.arguments)));
-                ui::set_row(weak, row, "tool", &details);
+                ui::set_row(front, row, "tool", &details);
                 let out = if tc.name == crate::choices::PALETTE_TOOL {
                     crate::choices::palette_catalog().to_string()
                 } else if tc.name == crate::contrast::TOOL {
@@ -964,14 +969,14 @@ async fn run_turn(
                     match crate::commands::Request::parse(&args) {
                         Ok(request) => {
                             let confirmation = approvals.request(
-                                weak,
+                                front,
                                 request.command.clone(),
                                 request.reason.clone(),
                             );
                             match crate::commands::run(request, filesystem, confirmation).await {
                                 Ok(value) => {
                                     if value["status"] == "manual_only" {
-                                        show_manual_command(weak, &value, translations);
+                                        show_manual_command(front, &value, translations);
                                     }
                                     value.to_string()
                                 }
@@ -994,7 +999,7 @@ async fn run_turn(
                         && crate::commands::needs_mcp_approval(&tc.name)
                         && !approvals
                             .request(
-                                weak,
+                                front,
                                 format!("{}({})", tc.name, Value::Object(args.clone())),
                                 translations.command_desktop.clone(),
                             )
@@ -1004,7 +1009,7 @@ async fn run_turn(
                     } else if !filesystem.allows_mcp(&tc.name) {
                         json!({"error":"Permission revoked"}).to_string()
                     } else {
-                        ui::set_activity(weak, "tools");
+                        ui::set_activity(front, "tools");
                         let call = session.call(&tc.name, args);
                         match tokio::time::timeout(TIMEOUT_TOOL, call).await {
                             Ok(Ok(o)) => o,
@@ -1017,7 +1022,7 @@ async fn run_turn(
                 };
                 details.push('\n');
                 details.push_str(&out);
-                ui::set_row(weak, row, "tool", &details);
+                ui::set_row(front, row, "tool", &details);
                 out
             };
             if serde_json::from_str::<Value>(&out)
@@ -1025,7 +1030,7 @@ async fn run_turn(
                 .is_some_and(|v| v["status"] == "declined")
             {
                 declined = true;
-                ui::append(weak, "status", &translations.command_declined);
+                ui::append(front, "status", &translations.command_declined);
             }
             // Tous les tool_use reçoivent un résultat, même ceux différés par le choix.
             convo.push(Message::new_tool_message(&out, tc.id.clone()));
@@ -1058,7 +1063,7 @@ fn authorized_choices(
 async fn stream_turn(
     llm: &Claude,
     convo: &[Message],
-    weak: &Weak<ChatWindow>,
+    front: &ui::Front,
 ) -> anyhow::Result<(String, GenerateResult)> {
     let mut stream = llm.generate_stream(convo);
     let mut text = String::new();
@@ -1073,7 +1078,7 @@ async fn stream_turn(
             Ok(next) => next,
             Err(_) => {
                 if pending_text {
-                    ui::update_last(weak, "assistant", &text);
+                    ui::update_last(front, "assistant", &text);
                 }
                 return Err(anyhow!("LLM : silence depuis {} s", TIMEOUT_LLM.as_secs()));
             }
@@ -1083,7 +1088,7 @@ async fn stream_turn(
             Ok(event) => event,
             Err(error) => {
                 if pending_text {
-                    ui::update_last(weak, "assistant", &text);
+                    ui::update_last(front, "assistant", &text);
                 }
                 return Err(error);
             }
@@ -1095,17 +1100,17 @@ async fn stream_turn(
                 }
                 if !writing {
                     writing = true;
-                    ui::set_activity(weak, "writing");
+                    ui::set_activity(front, "writing");
                 }
                 let first_chunk = !bubble_created;
                 if first_chunk {
                     bubble_created = true;
-                    ui::append(weak, "assistant", "");
+                    ui::append(front, "assistant", "");
                 }
                 text.push_str(&chunk);
                 pending_text = true;
                 if first_chunk || last_flush.elapsed() >= Duration::from_millis(33) {
-                    ui::update_last(weak, "assistant", &text);
+                    ui::update_last(front, "assistant", &text);
                     pending_text = false;
                     last_flush = std::time::Instant::now();
                 }
@@ -1113,7 +1118,7 @@ async fn stream_turn(
             LLMEvent::Thinking(_) => {
                 if writing {
                     writing = false;
-                    ui::set_activity(weak, "thinking");
+                    ui::set_activity(front, "thinking");
                 }
             }
             LLMEvent::Done(r) => result = Some(r),
@@ -1123,12 +1128,12 @@ async fn stream_turn(
 
     // Toujours vider le dernier fragment, même sur une interruption du flux.
     if pending_text {
-        ui::update_last(weak, "assistant", &text);
+        ui::update_last(front, "assistant", &text);
     }
     let result = result.context("flux terminé sans résultat final")?;
     if bubble_created && text.is_empty() {
         // bulle créée puis restée vide (tour outils sans texte) : on la retire
-        ui::remove_last(weak);
+        ui::remove_last(front);
     }
     Ok((text, result))
 }

@@ -1,10 +1,9 @@
 //! Exécution selon la politique choisie ; chaque confirmation porte sur le contenu exact.
-use crate::{ChatWindow, filesystem::FilesystemAccess};
+use crate::{filesystem::FilesystemAccess, ui::Front};
 use anyhow::{Context, ensure};
 use langchain_rust::schemas::FunctionDefinition;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use slint::Weak;
 use std::{
     future::Future,
     process::Stdio,
@@ -48,11 +47,24 @@ impl Approvals {
         }
     }
 
-    pub async fn request(&self, weak: &Weak<ChatWindow>, details: String, reason: String) -> bool {
+    pub async fn request(&self, front: &Front, details: String, reason: String) -> bool {
         let Ok((id, receiver)) = self.begin() else {
             return false;
         };
-        let weak = weak.clone();
+        let weak = match front {
+            Front::Window(weak) => weak.clone(),
+            Front::Terminal(terminal) => {
+                // Lecture bloquante de stdin hors du runtime : la boucle de
+                // saisie attend la fin du tour et ne lit pas en parallèle.
+                let terminal = terminal.clone();
+                let approved =
+                    tokio::task::spawn_blocking(move || terminal.confirm(&details, &reason))
+                        .await
+                        .unwrap_or(false);
+                self.answer(id, approved);
+                return receiver.await.unwrap_or(false);
+            }
+        };
         let pending = self.clone();
         if slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else {

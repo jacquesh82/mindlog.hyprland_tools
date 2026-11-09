@@ -6,6 +6,7 @@ mod agent;
 mod avatar;
 mod chat_config;
 mod choices;
+mod cli;
 mod clipboard;
 mod commands;
 mod contrast;
@@ -48,6 +49,14 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("init") => return cmd_init(),
+        Some("cli") => {
+            if args[1..].iter().any(|a| a == "--help" || a == "-h") {
+                print!("{}", cli::USAGE);
+                return Ok(());
+            }
+            let code = cli::run(&args[1..])?;
+            std::process::exit(code);
+        }
         Some("check-providers") => {
             let cfg = chat_config::ChatConfig::load().map_err(anyhow::Error::msg)?;
             return tokio::runtime::Runtime::new()?.block_on(providers::diagnose(
@@ -73,7 +82,7 @@ fn main() -> anyhow::Result<()> {
             });
         }
         Some("--help") | Some("-h") | Some("help") => {
-            print!("{USAGE}");
+            print!("{USAGE}{}", cli::USAGE);
             return Ok(());
         }
         Some(other) => {
@@ -85,28 +94,9 @@ fn main() -> anyhow::Result<()> {
 
     let (cfg, _) = chat_config::ChatConfig::load_or_init()
         .map_err(|e| anyhow::anyhow!("configuration du chat : {e}"))?;
-    let fs_backups = chat_config::state_history_path()
-        .parent()
-        .context("dossier de données")?
-        .join("file-backups");
-    let filesystem = std::sync::Arc::new(
-        filesystem::FilesystemAccess::new(filesystem::FilesystemAccess::default_root(), fs_backups)
-            .protect_directory(
-                chat_config::config_path()
-                    .parent()
-                    .context("dossier des réglages")?
-                    .to_path_buf(),
-            )
-            .protect_directory(
-                chat_config::state_history_path()
-                    .parent()
-                    .context("dossier de données")?
-                    .to_path_buf(),
-            ),
-    );
+    let filesystem = build_filesystem(&cfg)?;
 
     let app = ChatWindow::new().context("création de la fenêtre (session Wayland active ?)")?;
-    filesystem.set_operation_mode(cfg.operation_mode);
     avatar::install(&app);
     app.set_provider_index(cfg.provider.index());
     app.set_model_label(cfg.model_label().into());
@@ -572,13 +562,43 @@ fn main() -> anyhow::Result<()> {
                     return;
                 }
             };
-            runtime.block_on(agent::run(cfg, rx, weak, filesystem, approvals));
+            runtime.block_on(agent::run(
+                cfg,
+                rx,
+                ui::Front::Window(weak),
+                filesystem,
+                approvals,
+            ));
         })
         .context("thread agent")?;
 
     app.invoke_request_filesystem();
     app.run().context("boucle d'événements Slint")?;
     Ok(())
+}
+
+/// Accès fichiers commun à la fenêtre et à la CLI : réglages et données
+/// LYRA protégés, mode d'exécution de la config.
+pub(crate) fn build_filesystem(
+    cfg: &chat_config::ChatConfig,
+) -> anyhow::Result<std::sync::Arc<filesystem::FilesystemAccess>> {
+    let data_dir = chat_config::state_history_path()
+        .parent()
+        .context("dossier de données")?
+        .to_path_buf();
+    let filesystem = filesystem::FilesystemAccess::new(
+        filesystem::FilesystemAccess::default_root(),
+        data_dir.join("file-backups"),
+    )
+    .protect_directory(
+        chat_config::config_path()
+            .parent()
+            .context("dossier des réglages")?
+            .to_path_buf(),
+    )
+    .protect_directory(data_dir);
+    filesystem.set_operation_mode(cfg.operation_mode);
+    Ok(std::sync::Arc::new(filesystem))
 }
 
 fn cmd_init() -> anyhow::Result<()> {
