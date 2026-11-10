@@ -15,6 +15,7 @@ use slint::{Model, ModelRc, Weak};
 use crate::ChatWindow;
 use crate::MessageRow;
 use crate::cli::Terminal;
+use crate::i18n::Tr;
 
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
@@ -313,4 +314,71 @@ pub fn set_tr(front: impl Into<Front>, translations: &crate::i18n::Tr) {
             ui.set_tr(texts);
         }
     });
+}
+
+/// Une ligne d'état fournisseur : nom, prêt, détail (déjà traduit).
+pub type ProviderLine = (String, bool, String);
+
+/// Affiche l'état des fournisseurs. Fenêtre : panneau au-dessus de la saisie
+/// et blocage d'Envoyer tant que `ready` est faux. Terminal : bloc imprimé.
+pub fn set_providers(front: &Front, ready: bool, lines: Vec<ProviderLine>, tr: &Tr) {
+    match front {
+        Front::Window(weak) => {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                let Some(app) = weak.upgrade() else { return };
+                let rows: Vec<crate::ProviderStatusRow> = lines
+                    .into_iter()
+                    .map(|(name, ready, detail)| crate::ProviderStatusRow {
+                        name: name.into(),
+                        ready,
+                        detail: detail.into(),
+                    })
+                    .collect();
+                app.set_provider_status(std::rc::Rc::new(slint::VecModel::from(rows)).into());
+                app.set_providers_ready(ready);
+            });
+        }
+        Front::Terminal(terminal) => {
+            if !ready {
+                terminal.append("error", &providers_text(&lines, tr));
+            }
+        }
+    }
+}
+
+/// Texte du panneau pour le terminal — pur.
+pub fn providers_text(lines: &[ProviderLine], tr: &Tr) -> String {
+    let mut text = format!("{}\n{}", tr.providers_title, tr.providers_intro_cli);
+    for (name, ready, detail) in lines {
+        text.push_str(&format!(
+            "\n  {} {name} : {detail}",
+            if *ready { "✓" } else { "✗" }
+        ));
+    }
+    text
+}
+
+pub fn set_providers_checking(front: &Front, checking: bool) {
+    if let Front::Window(weak) = front {
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_providers_checking(checking);
+            }
+        });
+    }
+}
+
+/// Repli de session : la fenêtre met à jour son sélecteur et sa copie de la
+/// configuration (sans l'enregistrer).
+pub fn provider_fallback(front: &Front, provider: crate::chat_config::Provider) {
+    if let Front::Window(weak) = front {
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade() {
+                app.invoke_provider_fallback(provider.index());
+            }
+        });
+    }
 }

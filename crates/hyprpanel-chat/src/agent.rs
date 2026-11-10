@@ -44,6 +44,8 @@ pub enum UserEvent {
     FilesystemChanged,
     EnvironmentRefresh,
     ClearMemory,
+    /// Revérifie les fournisseurs (bouton « Revérifier »).
+    RecheckProviders,
     /// Barrière (CLI) : répond une fois les événements précédents traités.
     Sync(tokio::sync::oneshot::Sender<()>),
 }
@@ -231,14 +233,6 @@ pub async fn run(
     let mut cfg = cfg;
     let mut translations = tr(cfg.lang());
 
-    if cfg.provider == crate::chat_config::Provider::Zcode && cfg.api_key.trim().is_empty() {
-        ui::append(
-            &front,
-            "error",
-            "Clé API absente : remplissez « clé API » dans ⚙ réglages.\n/api key missing: fill it in the ⚙ settings panel.",
-        );
-    }
-
     // Connexion MCP + définitions d'outils pour le LLM.
     let mcp = match cfg.mcp_url() {
         Ok(url) => match McpSession::connect(&url).await {
@@ -254,26 +248,21 @@ pub async fn run(
                 );
                 Some(session)
             }
-            Err(e) => {
-                ui::append(
-                    &front,
-                    "error",
-                    format!("{} : {e:#}", translations.mcp_unavailable),
-                );
+            Err(_) => {
+                // Message clair, sans chemin ni erreur technique (voir check-providers).
+                ui::append(&front, "error", &translations.daemon_missing);
                 ui::set_status(&front, "MCP ✗");
                 None
             }
         },
-        Err(e) => {
-            ui::append(
-                &front,
-                "error",
-                format!("Config du daemon introuvable : {e} (lancez `hyprpanel init`)"),
-            );
+        Err(_) => {
+            ui::append(&front, "error", &translations.daemon_missing);
             ui::set_status(&front, "daemon ✗");
             None
         }
     };
+    // Avant le premier modèle : fournisseur prêt, repli de session ou panneau.
+    let mut providers_ready = refresh_providers(&mut cfg, &front, &translations, true).await;
     let mut environment_ready = filesystem.approved();
     if environment_ready {
         refresh_environment(&front, &filesystem, &approvals, &translations).await;
@@ -281,7 +270,7 @@ pub async fn run(
     let mut functions = available_functions(mcp.as_ref(), &filesystem);
 
     let mut llm = build_llm(&cfg, &functions);
-    let mut system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+    let mut system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
     let mut convo: Vec<Message> = vec![Message::new_system_message(system.clone())];
 
     let mut ledger = Ledger::load(crate::chat_config::state_history_path());
@@ -315,7 +304,7 @@ pub async fn run(
                 }
                 functions = available_functions(mcp.as_ref(), &filesystem);
                 llm = build_llm(&cfg, &functions);
-                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
                 convo[0] = Message::new_system_message(system.clone());
                 if !filesystem.approved() {
                     convo.truncate(1);
@@ -324,14 +313,14 @@ pub async fn run(
             UserEvent::EnvironmentRefresh => {
                 if filesystem.approved() {
                     refresh_environment(&front, &filesystem, &approvals, &translations).await;
-                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
                     convo[0] = Message::new_system_message(system.clone());
                 }
             }
             UserEvent::Choice { .. } => unreachable!("choix normalisé en message utilisateur"),
             UserEvent::ClearMemory => match crate::memory::clear() {
                 Ok(()) => {
-                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+                    system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
                     convo = vec![Message::new_system_message(system.clone())];
                     ui::clear(&front);
                     ui::set_status(&front, &translations.memory_cleared);
@@ -341,10 +330,16 @@ pub async fn run(
                 }
             },
             UserEvent::Reset => {
-                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
                 convo = vec![Message::new_system_message(system.clone())];
                 ui::clear(&front);
                 ui::set_status(&front, &translations.new_conversation);
+            }
+            UserEvent::RecheckProviders => {
+                providers_ready = refresh_providers(&mut cfg, &front, &translations, true).await;
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
+                convo[0] = Message::new_system_message(system.clone());
+                llm = build_llm(&cfg, &functions);
             }
             UserEvent::ConfigUpdated(new_cfg) => {
                 cfg = *new_cfg;
@@ -352,7 +347,8 @@ pub async fn run(
                 functions = available_functions(mcp.as_ref(), &filesystem);
                 translations = tr(cfg.lang());
                 ui::set_tr(&front, &translations);
-                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, None);
+                providers_ready = refresh_providers(&mut cfg, &front, &translations, true).await;
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, None);
                 convo[0] = Message::new_system_message(system.clone());
                 llm = build_llm(&cfg, &functions);
                 ui::set_status(&front, &translations.settings_saved);
@@ -363,8 +359,19 @@ pub async fn run(
                 files,
                 pasted_images: _pasted_images,
             } => {
+                // Aucun fournisseur : revérifier (connexion faite entre-temps ?),
+                // sinon ne rien envoyer.
+                if !providers_ready {
+                    providers_ready =
+                        refresh_providers(&mut cfg, &front, &translations, false).await;
+                    if !providers_ready {
+                        ui::append(&front, "error", &translations.provider_blocked);
+                        continue;
+                    }
+                    llm = build_llm(&cfg, &functions);
+                }
                 // Recherche avant l'ajout de la demande courante : elle ne se retrouve pas elle-même.
-                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, Some(&text));
+                system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front, Some(&text));
                 convo[0] = Message::new_system_message(system.clone());
                 if let Err(error) = crate::memory::remember(
                     filesystem.approved(),
@@ -456,17 +463,20 @@ pub async fn run(
                 };
                 let mut args = Map::new();
                 args.insert("name".into(), json!(name));
-                if filesystem.operation_mode().confirm_desktop()
-                    && !approvals
-                        .request(
-                            &front,
-                            format!(
-                                "hypr_restore_backup({})\nhypr_reload({{}})",
-                                Value::Object(args.clone())
-                            ),
-                            translations.command_restore.clone(),
-                        )
-                        .await
+                if !approvals
+                    .confirm(
+                        &front,
+                        filesystem
+                            .operation_mode()
+                            .desktop_confirmation("hypr_restore_backup"),
+                        format!(
+                            "hypr_restore_backup({})\nhypr_reload({{}})",
+                            Value::Object(args.clone())
+                        ),
+                        translations.command_restore.clone(),
+                        &translations,
+                    )
+                    .await
                 {
                     ui::append(&front, "status", &translations.command_declined);
                     ui::set_busy(&front, false);
@@ -585,7 +595,15 @@ async fn refresh_environment(
                 None,
             );
             let reason = translations.environment_query.replace("{}", query.manager);
-            let confirmation = approvals.request(front, query.command.into(), reason.clone());
+            let confirmation = approvals.confirm(
+                front,
+                filesystem
+                    .operation_mode()
+                    .command_confirmation(query.command),
+                query.command.into(),
+                reason.clone(),
+                translations,
+            );
             let request = crate::commands::Request {
                 command: query.command.into(),
                 reason,
@@ -696,20 +714,112 @@ fn available_functions(
     functions
 }
 
+/// Lignes d'état traduites pour le panneau des fournisseurs — pur.
+pub(crate) fn provider_lines(
+    statuses: &[crate::providers::Status],
+    translations: &Tr,
+) -> Vec<ui::ProviderLine> {
+    use crate::providers::Problem;
+    statuses
+        .iter()
+        .map(|status| {
+            let help = crate::providers::login_help(status.provider);
+            let detail = match status.problem {
+                None => translations.provider_ready.clone(),
+                Some(Problem::MissingKey) => translations.provider_missing_key.clone(),
+                Some(Problem::Endpoint) => translations.provider_endpoint.clone(),
+                Some(Problem::NotInstalled) => {
+                    translations.provider_not_installed.replace("{}", help)
+                }
+                Some(Problem::NotLoggedIn) => {
+                    translations.provider_not_logged_in.replace("{}", help)
+                }
+                Some(Problem::Timeout) => translations.provider_timeout.clone(),
+            };
+            (
+                status.provider.label().to_string(),
+                status.problem.is_none(),
+                detail,
+            )
+        })
+        .collect()
+}
+
+/// Vérifie les trois fournisseurs et applique le choix : fournisseur prêt,
+/// repli pour la session (annoncé), ou panneau « aucun fournisseur ». Renvoie
+/// vrai si un fournisseur est utilisable. `report` faux : le panneau déjà
+/// affiché n'est pas répété (terminal).
+async fn refresh_providers(
+    cfg: &mut ChatConfig,
+    front: &ui::Front,
+    translations: &Tr,
+    report: bool,
+) -> bool {
+    use crate::providers::Choice;
+    ui::set_providers_checking(front, true);
+    ui::set_status(front, &translations.providers_checking);
+    let statuses = crate::providers::availability(cfg).await;
+    ui::set_providers_checking(front, false);
+    let lines = provider_lines(&statuses, translations);
+    match crate::providers::choose(cfg.provider, &statuses, true) {
+        Choice::Ready => {
+            ui::set_providers(front, true, lines, translations);
+            ui::set_status(front, "");
+            true
+        }
+        Choice::Fallback(provider) => {
+            let from = cfg.provider;
+            *cfg = cfg.clone().with_session_provider(provider);
+            ui::provider_fallback(front, provider);
+            ui::set_providers(front, true, lines, translations);
+            let notice = translations
+                .provider_fallback
+                .replace("{from}", from.label())
+                .replace("{to}", provider.label());
+            ui::append(front, "status", &notice);
+            ui::set_status(front, &notice);
+            true
+        }
+        Choice::Unavailable => {
+            if report {
+                ui::set_providers(front, false, lines, translations);
+            }
+            ui::set_status(front, &translations.providers_title);
+            false
+        }
+    }
+}
+
 fn runtime_system(
     cfg: &ChatConfig,
     mcp: Option<&McpSession>,
     filesystem: &crate::filesystem::FilesystemAccess,
+    front: &ui::Front,
     query: Option<&str>,
 ) -> String {
+    // Identité + environnement d'exécution : permanents, quel que soit l'accord.
+    let identity = crate::identity::block(
+        cfg.lang(),
+        cfg,
+        &crate::identity::State {
+            interface: match front {
+                ui::Front::Window(_) => crate::identity::Interface::Window,
+                ui::Front::Terminal(_) => crate::identity::Interface::Terminal,
+            },
+            filesystem_approved: filesystem.approved(),
+            root: filesystem.root(),
+            mcp_tools: mcp.map(|m| m.tools().len()),
+        },
+        &crate::identity::facts(),
+    );
     let mut instructions = mcp.and_then(|m| m.instructions()).unwrap_or_default();
     let directory = if filesystem.approved() {
         filesystem.root().display().to_string()
     } else {
-        "~/.config".into()
+        "~".into()
     };
     instructions.push_str(&format!(
-        "\n\nFILESYSTEM PERMISSION: {}. Configuration directory: {directory}. ",
+        "\n\nFILESYSTEM PERMISSION: {}. Working directory (user's home): {directory}. ",
         if filesystem.approved() {
             "GRANTED for this session"
         } else {
@@ -719,12 +829,14 @@ fn runtime_system(
     instructions.push_str(if filesystem.approved() && !filesystem.operation_mode().can_operate() {
         "Read-only analysis: use lyra_list_directory and lyra_read_file. Copy-only mode blocks file writes, all desktop/MCP operations, command execution, backups and restores. lyra_run_command only displays a command to copy."
     } else if filesystem.approved() {
-        "Use lyra_list_directory, lyra_read_file and lyra_write_file to work with configuration files. Never claim an edit succeeded without its tool result. Only write when the user has requested that change. Private LYRA files and generated files remain protected. Raw Lua and arbitrary dispatch tools are unavailable."
+        "Use lyra_list_directory, lyra_read_file and lyra_write_file to work with any of the user's files (documents, projects, notes, configuration). Never claim an edit succeeded without its tool result. Only write when the user has requested that change. Private LYRA files, credentials (SSH, GPG, keyrings, provider tokens) and generated files remain protected. Raw Lua and arbitrary dispatch tools are unavailable."
     } else {
-        "No filesystem or desktop tools are authorized. Do not read, back up or modify local configuration through another mechanism. Ask the user to open Settings and allow filesystem access when needed. Explicitly attached files can still be discussed."
+        "No filesystem or desktop tools are authorized. Do not read, back up or modify local files through another mechanism. Ask the user to open Settings and allow filesystem access when needed. Explicitly attached files can still be discussed."
     });
     instructions.push_str("\n\n");
     instructions.push_str(&crate::environment::context(filesystem.approved()));
+    // Relu à chaque prompt système, donc à chaque nouvelle conversation.
+    instructions.push_str(&crate::context_d::section(cfg.lang()));
     if let Some(query) = query {
         instructions.push_str(
             &crate::memory::recall(filesystem.approved(), cfg.memory_enabled, query)
@@ -737,9 +849,9 @@ fn runtime_system(
     ));
     build_system_with_policy(
         cfg.lang(),
+        &identity,
         Some(&instructions),
         &cfg.system_context,
-        cfg.limit_wayland_scope,
         cfg.operation_mode,
     )
 }
@@ -761,58 +873,61 @@ pub(crate) fn build_system(
     server_instructions: Option<&str>,
     custom_context: &str,
 ) -> String {
-    build_system_with_scope(lang, server_instructions, custom_context, true)
-}
-
-pub(crate) fn build_system_with_scope(
-    lang: Lang,
-    server_instructions: Option<&str>,
-    custom_context: &str,
-    limit_wayland_scope: bool,
-) -> String {
     build_system_with_policy(
         lang,
+        "",
         server_instructions,
         custom_context,
-        limit_wayland_scope,
-        crate::operations::Mode::ConfirmAll,
+        crate::operations::Mode::ConfirmOnce,
     )
+}
+
+/// Rôle permanent de LYRA : agente de bureau généraliste, à la manière d'un
+/// collègue qui travaille sur l'ordinateur de l'utilisateur.
+fn role(lang: Lang) -> &'static str {
+    match lang {
+        Lang::Fr => {
+            "Tu es LYRA, une agente de bureau Linux qui travaille directement sur l'ordinateur de l'utilisateur, comme une collègue. \
+Tu traites toute demande : fichiers et documents, rédaction, recherche et synthèse, analyse de données, scripts et développement, \
+administration du système, applications et navigateurs, bureau Hyprland/Wayland, questions générales. \
+Pour une tâche en plusieurs étapes, annonce un plan court, exécute-le avec les outils disponibles (fichiers, commandes, web, bureau), \
+vérifie le résultat réel puis rends compte de ce qui a été fait et de ce qui reste. Préfère agir plutôt que de longues explications ; \
+pose une question seulement si une information indispensable manque. Réponds en français, de façon concise et actionnable. \
+Préviens avec hypr_notify avant un changement visible important du bureau. Si une action est risquée (perte de données, écrans, saisie, système), \
+explique le risque et demande confirmation."
+        }
+        Lang::En => {
+            "You are LYRA, a Linux desktop agent working directly on the user's computer, like a colleague. \
+You handle any request: files and documents, writing, research and synthesis, data analysis, scripts and development, \
+system administration, applications and browsers, the Hyprland/Wayland desktop, general questions. \
+For multi-step work, state a short plan, carry it out with the available tools (files, commands, web, desktop), \
+check the real outcome, then report what was done and what remains. Prefer acting over long explanations; \
+ask only when essential information is missing. Answer concisely and actionably, in English. \
+Warn with hypr_notify before any major visible desktop change. If an action is risky (data loss, monitors, input, system), \
+explain the risk and ask for confirmation. (The server instructions below are written in French.)"
+        }
+    }
 }
 
 fn build_system_with_policy(
     lang: Lang,
+    identity: &str,
     server_instructions: Option<&str>,
     custom_context: &str,
-    limit_wayland_scope: bool,
     operation_mode: crate::operations::Mode,
 ) -> String {
-    let mut system = if custom_context.trim().is_empty() {
-        if !limit_wayland_scope {
-            match lang {
-                Lang::Fr => "Tu es LYRA, une assistante généraliste dans une fenêtre native. Réponds en français aux demandes de l'utilisateur, de façon claire et utile. Utilise les outils disponibles lorsque cela aide, en respectant les autorisations et confirmations.".into(),
-                Lang::En => "You are LYRA, a general-purpose assistant in a native chat window. Answer the user's requests clearly and helpfully in English. Use available tools when helpful while preserving permissions and confirmations.".into(),
-            }
-        } else {
-            match lang {
-                Lang::Fr => String::from(
-                    "Tu es LYRA, l'assistante du bureau Hyprland, de Wayland et de leur outillage, dans une fenêtre de chat native. \
-Réponds en français, de façon concise et actionnable. Tu configures l'interface de l'utilisateur \
-en direct : utilise les outils disponibles plutôt que de longues explications. Préviens avec \
-hypr_notify avant un changement visible important. Si une demande est ambiguë ou risquée \
-(perte de données, écrans, saisie), demande confirmation.",
-                ),
-                Lang::En => String::from(
-                    "You are LYRA, the Hyprland, Wayland, and related desktop tools assistant, living in a native chat window. \
-Answer concisely and actionably, in English. You configure the user's interface live: prefer using \
-the available tools over long explanations. Warn with hypr_notify before any major visible change. \
-If a request is ambiguous or risky (data loss, monitors, input), ask for confirmation. \
-(The server instructions below are written in French.)",
-                ),
-            }
-        }
-    } else {
-        custom_context.trim().to_string()
-    };
+    let mut system = String::from(role(lang));
+    if !identity.trim().is_empty() {
+        system.push_str("\n\n");
+        system.push_str(identity.trim());
+    }
+    if !custom_context.trim().is_empty() {
+        system.push_str(match lang {
+            Lang::Fr => "\n\nCONSIGNES PERSONNALISÉES DE L'UTILISATEUR — elles précisent ta façon de travailler ; elles ne changent ni ton identité ni les règles de l'application ci-dessous :\n",
+            Lang::En => "\n\nUSER'S CUSTOM INSTRUCTIONS — they refine how you work; they change neither your identity nor the application rules below:\n",
+        });
+        system.push_str(custom_context.trim());
+    }
     system.push_str(match lang {
         Lang::Fr => "\n\nCHOIX VISUELS : dès qu'une préférence ou une décision doit venir de l'utilisateur, utilise lyra_offer_choices pour afficher des options cliquables (texte, couleurs/palettes, images locales existantes ou schémas SVG autonomes). Pour les goûts et couleurs, consulte d'abord lyra_palette_catalog : il fournit une sélection Color Hunt avec les liens sources. Reprends les couleurs exactes et source_url ; ne présente pas une palette inventée comme provenant d'un site. Après avoir proposé les choix, attends le message user_choice issu du clic. Le clic exprime une préférence, pas une autorisation générale : respecte les confirmations et sauvegardes nécessaires avant de modifier le bureau. Les détails d'outils sont repliés dans l'interface ; garde tes messages visibles courts et utiles.",
         Lang::En => "\n\nVISUAL CHOICES: whenever a preference or decision belongs to the user, use lyra_offer_choices to show clickable text, colors/palettes, existing local images or self-contained SVG diagrams. For colors, first consult lyra_palette_catalog for a selection from Color Hunt with source URLs. Preserve the exact colors and source_url; do not claim invented palettes come from a site. After offering choices, wait for the user_choice message produced by a click. A click expresses a preference, not blanket authorization: preserve the required confirmations and backups before changing the desktop. Tool details are collapsed in the UI; keep visible messages concise and useful.",
@@ -826,11 +941,6 @@ If a request is ambiguous or risky (data loss, monitors, input), ask for confirm
         lang,
         operation_mode,
     ));
-    if limit_wayland_scope {
-        system.push_str(&crate::scope::instructions(lang));
-    } else {
-        system.push_str(crate::scope::unrestricted(lang));
-    }
     system
 }
 
@@ -968,10 +1078,14 @@ async fn run_turn(
                     let args: Value = serde_json::from_str(&tc.arguments).unwrap_or(Value::Null);
                     match crate::commands::Request::parse(&args) {
                         Ok(request) => {
-                            let confirmation = approvals.request(
+                            let confirmation = approvals.confirm(
                                 front,
+                                filesystem
+                                    .operation_mode()
+                                    .command_confirmation(&request.command),
                                 request.command.clone(),
                                 request.reason.clone(),
+                                translations,
                             );
                             match crate::commands::run(request, filesystem, confirmation).await {
                                 Ok(value) => {
@@ -995,13 +1109,14 @@ async fn run_turn(
                     json!({"error":"Filesystem/desktop access is not authorized, or this raw tool is unavailable. Ask the user to review permissions in Settings."}).to_string()
                 } else if let Some(session) = session {
                     let args = parse_tool_arguments(&tc.arguments);
-                    if filesystem.operation_mode().confirm_desktop()
-                        && crate::commands::needs_mcp_approval(&tc.name)
+                    if crate::commands::needs_mcp_approval(&tc.name)
                         && !approvals
-                            .request(
+                            .confirm(
                                 front,
+                                filesystem.operation_mode().desktop_confirmation(&tc.name),
                                 format!("{}({})", tc.name, Value::Object(args.clone())),
                                 translations.command_desktop.clone(),
+                                translations,
                             )
                             .await
                     {
@@ -1198,46 +1313,102 @@ mod tests {
     }
 
     #[test]
-    fn system_context_replaces_role_and_retains_tool_instructions() {
-        let custom = "You are an accessibility-focused desktop assistant.";
+    fn panneau_fournisseurs_traduit_sans_chemin_technique() {
+        use crate::chat_config::Provider;
+        use crate::providers::{Problem, Status};
+        let statuses = vec![
+            Status {
+                provider: Provider::Zcode,
+                problem: Some(Problem::MissingKey),
+            },
+            Status {
+                provider: Provider::ClaudeCode,
+                problem: Some(Problem::NotLoggedIn),
+            },
+            Status {
+                provider: Provider::Codex,
+                problem: Some(Problem::NotInstalled),
+            },
+        ];
+        for lang in [Lang::Fr, Lang::En] {
+            let translations = tr(lang);
+            let lines = provider_lines(&statuses, &translations);
+            assert_eq!(lines.len(), 3);
+            assert!(lines.iter().all(|(_, ready, _)| !ready));
+            assert_eq!(lines[0].0, "Zcode");
+            assert!(lines[1].2.contains("claude auth login"));
+            assert!(lines[2].2.contains("codex login"));
+            let text = ui::providers_text(&lines, &translations);
+            assert!(text.starts_with(&translations.providers_title));
+            assert!(text.contains("✗ Codex"));
+            assert!(
+                !text.contains('/'),
+                "pas de chemin dans le panneau : {text}"
+            );
+        }
+        let ready = provider_lines(
+            &[Status {
+                provider: Provider::Codex,
+                problem: None,
+            }],
+            &tr(Lang::Fr),
+        );
+        assert_eq!(ready[0], ("Codex".into(), true, "prêt".into()));
+    }
+
+    #[test]
+    fn custom_context_complements_permanent_identity_and_rules() {
+        let custom = "Focus on accessibility.";
         let system = build_system(
             Lang::En,
             Some("Keep generated configuration files read-only."),
             custom,
         );
-        assert!(system.starts_with(custom));
-        assert!(!system.contains("living in a native chat window"));
+        assert!(system.starts_with("You are LYRA, a Linux desktop agent"));
+        assert!(system.contains("USER'S CUSTOM INSTRUCTIONS"));
+        assert!(system.contains(custom));
+        assert!(system.find("You are LYRA").unwrap() < system.find(custom).unwrap());
         assert!(system.contains("lyra_offer_choices"));
         assert!(system.contains("Keep generated configuration files read-only."));
-        assert!(system.contains("lyra_web_search"));
-        assert!(system.contains("lyra_web_fetch"));
-        assert!(system.contains("lyra_run_command"));
-        assert!(system.contains("lyra_check_contrast"));
+        for tool in [
+            "lyra_web_search",
+            "lyra_web_fetch",
+            "lyra_run_command",
+            "lyra_check_contrast",
+        ] {
+            assert!(system.contains(tool), "{tool}");
+        }
         assert!(system.contains("WCAG 2.2 AA"));
-        assert!(system.contains("requires native user confirmation"));
-        assert!(
-            system.ends_with(crate::scope::redirect(Lang::En)),
-            "le périmètre commun s'applique aussi au rôle personnalisé"
-        );
-        assert!(build_system(Lang::Fr, None, custom).ends_with(crate::scope::redirect(Lang::Fr)));
+        assert!(system.contains("Dangerous commands"));
         assert!(build_system(Lang::Fr, None, "").starts_with("Tu es LYRA"));
         assert!(build_system(Lang::En, None, "   ").starts_with("You are LYRA"));
+        assert!(!build_system(Lang::En, None, "   ").contains("CUSTOM INSTRUCTIONS"));
     }
 
     #[test]
-    fn disabling_scope_removes_redirection_and_retains_permissions_and_contrast() {
+    fn general_agent_without_wayland_scope_and_identity_always_present() {
         for lang in [Lang::Fr, Lang::En] {
-            let system = build_system_with_scope(lang, None, "", false);
-            assert!(system.ends_with(crate::scope::unrestricted(lang)));
-            assert!(!system.contains(crate::scope::redirect(lang)));
+            let system = build_system_with_policy(
+                lang,
+                "IDENTITY-MARKER",
+                None,
+                "Only answer Hyprland questions.",
+                crate::operations::Mode::ConfirmOnce,
+            );
+            for removed in [
+                "PÉRIMÈTRE DE LYRA",
+                "LYRA’S SCOPE",
+                "REDIRECTION",
+                "REDIRECT",
+            ] {
+                assert!(!system.contains(removed), "{removed}");
+            }
+            // L'identité suit le rôle et précède les consignes personnalisées.
+            let identity = system.find("IDENTITY-MARKER").unwrap();
+            assert!(identity < system.find("Only answer Hyprland questions.").unwrap());
             assert!(system.contains("lyra_run_command"));
             assert!(system.contains("lyra_check_contrast"));
-            let custom =
-                build_system_with_scope(lang, None, "Only answer Hyprland questions.", false);
-            assert!(custom.ends_with(crate::scope::unrestricted(lang)));
         }
-        assert!(crate::scope::instructions(Lang::Fr).contains("thème pour Brave"));
-        assert!(crate::scope::instructions(Lang::En).contains("theme for Brave"));
     }
 
     #[test]

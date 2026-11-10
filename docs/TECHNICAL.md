@@ -44,8 +44,11 @@ hyprpanel-chat init
 ### Filesystem approval
 
 Each application session starts without assistant filesystem permission. A
-native dialog asks whether to allow reading and editing configurations under
-`~/.config`. Closing or declining the dialog does not grant access. Settings
+native dialog asks whether to allow reading and editing files under the home
+folder (`~`). Credentials stay protected even after approval (`~/.ssh`,
+`~/.gnupg`, `~/.password-store`, keyrings, cloud/container credentials, provider
+tokens, browser profiles) along with LYRA's own settings and data. The
+environment inventory still scans `~/.config` only. Closing or declining the dialog does not grant access. Settings
 lets the user grant or revoke access later; provider switching does not grant it.
 
 Before approval, LYRA exposes text/color/SVG choices, the static palette catalog,
@@ -159,7 +162,7 @@ profile remains available with filesystem consent even if conversation memory is
 New Chat keeps saved memory; changing provider uses the same local store. There are
 no per-keystroke scans. Relevant retrieved data is sent to the selected subscription
 provider as part of its request, with explicit untrusted-data/source boundaries
-before the mandatory permission, scope and color policies.
+before the mandatory permission, command and color policies.
 
 ### Long-operation feedback
 
@@ -205,7 +208,7 @@ gateway enforces network limits and command approval independently of the model.
 
 Settings uses native Slint tabs with independently scrollable pages: General
 (language, avatar), Access (filesystem consent, execution policy), Assistant
-(scope, subscription/model, SYSTEM context, client status), and Memory (conversation
+(subscription/model, SYSTEM context, client status), and Memory (conversation
 recall, clearing, environment profile). The footer stays visible. Unsaved values
 remain available when switching tabs; Save applies all pages together. The
 execution selector and Save are disabled while an operation is running.
@@ -246,17 +249,26 @@ Escape, closing, losing the target window, or an invalid/stale response denies
 execution. Confirmation IDs are single-use. A refusal stops the current tool
 round, defers remaining tool calls, and waits for another user message.
 
-Approved shell commands run through `/bin/sh -c` in `~/.config`, with the user's
-normal account permissions (including outside that directory). The modal explains
+Approved shell commands run through `/bin/sh -c` in the home folder, with the
+user's normal account permissions. The modal explains
 this boundary. There is no interactive stdin or terminal. Common credential
 environment variables and shell startup hooks are removed. Output is drained
 without blocking but retained only up to 32 KiB per stream; commands time out
 after 60 seconds, and their process group is stopped. A timeout may leave partial
-changes and never counts as success. Every later command that requires confirmation
-needs a fresh approval.
+changes and never counts as success.
 
-In the default mode, Hyprland IPC queries/actions and screenshots use the same modal with their exact
-tool name and JSON arguments. Managed file operations (configuration scans,
+In the default **Confirm once** mode, an approval is remembered for the rest of
+the session (`commands::Approvals`, in memory only): an ordinary command is keyed
+by the set of programs it runs, an opaque one (shells, interpreters, variable
+expansion, scripts) by its exact text. Dangerous commands
+(`operations::dangerous`: elevation, deletion, disks, system packages,
+shutdown/reboot, services, process killing, destructive git, download piped into
+a shell, writes into system directories, unparsable commands) need a fresh
+approval every time, in **Confirm once** and **Confirm sudo** alike. The modal
+states the scope of each approval.
+
+In the default mode, each Hyprland IPC action and screenshot is confirmed once
+per session, using the same modal with its tool name and JSON arguments. Managed file operations (configuration scans,
 backups, local text tools) and the static event buffer do not execute external
 commands. Restore follows the selected policy for the restore/reload pair.
 Provider client startup, authentication checks, and user-invoked UI helpers are
@@ -268,36 +280,31 @@ Open **Settings → Assistant → SYSTEM context** to define the assistant’s r
 The text is shared by all three providers and saved as `system_context` in
 `chat.toml`. Saving applies it to subsequent messages in the current conversation.
 
-An empty value uses LYRA’s default role in the selected interface language.
-A custom value replaces that role. LYRA still appends the Hyprland/Wayland
-scope, verification/command rules, environment context, the visual-choice protocol,
-and the MCP service instructions. The editor accepts up to 16,000 characters.
+LYRA’s role (a general desktop agent) and the identity/execution-environment
+block are always sent first. A custom value is appended as the user's custom
+instructions: it refines how LYRA works without replacing its identity. LYRA
+still appends verification/command rules, environment context, `context.d`
+texts, the visual-choice protocol, and the MCP service instructions. The editor
+accepts up to 16,000 characters.
 
 The context is sent as actual system instructions: a system message for Zcode,
 `--system-prompt` for Claude Code, and `baseInstructions` for Codex app-server.
 It is kept separate from the user’s conversation text.
 
-### Staying on topic
+### General agent, identity and environment
 
-A shared SYSTEM prompt limits LYRA to Hyprland, Wayland, and their associated
-tools: configuration and troubleshooting, monitors, input, appearance, bars,
-launchers, locking, screenshots, screen sharing, portals, and clipboard utilities.
-Related scripts and services, desktop applications, browsers, browser themes
-(including unpacked Brave/Chromium themes), and questions about LYRA are in scope.
+LYRA is no longer limited to Hyprland/Wayland: the shared SYSTEM prompt presents
+it as a general desktop agent that plans, acts with its tools, verifies and
+reports. The former `limit_wayland_scope` setting is gone; older `chat.toml`
+files that still contain it load normally and the key is dropped on next save.
 
-A fully unrelated request receives a short redirect with no answer to that topic
-or model-requested tool calls. Mixed requests are answered only for their
-relevant part. The prompt distinguishes a chocolate desktop palette from a
-cake recipe and asks LYRA to stop an off-topic thread even if an earlier answer
-had drifted. Custom roles remain subject to the selected scope.
-
-**Settings → Assistant → Limit actions to the Wayland desktop** is enabled by default,
-including for older configurations without the new `limit_wayland_scope` key.
-Disable it to answer general requests. The setting is saved in `chat.toml` and
-updates SYSTEM for all providers immediately on save; no new conversation is
-needed. General mode overrides earlier scope-only refusals and a custom role's
-Wayland specialization. It keeps verification, color accessibility rules,
-filesystem permissions, and the selected execution policy.
+Every SYSTEM prompt starts with the role, then an **identity and execution
+environment** block built on each turn (`src/identity.rs`): LYRA's version,
+provider and model, interface (window or terminal), tools, filesystem access,
+MCP daemon status, execution mode, and machine facts read without any command
+(`/etc/os-release`, `/proc/sys/kernel/osrelease`, architecture, `XDG_CURRENT_DESKTOP`,
+session type, Hyprland presence, `$SHELL`, `$LANG`). The home path appears only
+after filesystem approval.
 
 ### Subscriptions and models
 
@@ -406,12 +413,25 @@ service with the Wayland display detected at installation time.
 `hyprpanel check` also diagnoses IPC, configuration, backups, port availability,
 and `grim`. Its port check may report “occupied” when the service is already running.
 
+### Provider availability at startup
+
+`providers::availability` checks the three providers concurrently, with no model
+request: Zcode needs a non-empty key and the Coding Plan endpoint; Claude Code and
+Codex run their official `auth status` / `login status` (15 s timeout) and report
+`NotInstalled`, `NotLoggedIn` or `Timeout`. `providers::choose` (pure, tested)
+keeps the selected provider when ready, otherwise falls back to the first ready one
+for the session (`ChatConfig::with_session_provider`, so `chat.toml` keeps the saved
+choice), otherwise reports none. The agent runs it at startup, on **Check again**,
+after settings are saved, and before sending while no provider is ready. With none
+ready, the window shows the provider panel and disables Send (`providers-ready`);
+the terminal prints the same list and refuses the message (exit code 1 in one-shot
+mode). The daemon/MCP failure message no longer exposes file paths.
+
 ### Check subscriptions, streaming, and SYSTEM context
 
 ```bash
 hyprpanel-chat check-providers
 hyprpanel-chat check-providers --live
-hyprpanel-chat check-providers --scope
 hyprpanel-chat check-providers --policy
 hyprpanel-chat check-web
 ```
@@ -419,10 +439,7 @@ hyprpanel-chat check-web
 The first command checks the Coding Plan key and the official clients’ local
 login state. The live test makes real subscription requests, verifies that text
 fragments arrive before the final answer, checks a SYSTEM-context marker, and
-validates two clickable choices. `--scope` makes real model requests to check
-that restricted mode redirects a recipe while accepting Wayland and Brave-theme
-requests, and that general mode answers after an earlier scope refusal.
-`--policy` makes real subscription requests to verify that uncertainty produces
+validates two clickable choices. `--policy` makes real subscription requests to verify that uncertainty produces
 a web-tool request, that an exact command is proposed through LYRA’s tool,
 and that inaccessible Waybar text receives a computed contrast correction.
 It never executes proposed web/command actions; contrast calculation is pure.

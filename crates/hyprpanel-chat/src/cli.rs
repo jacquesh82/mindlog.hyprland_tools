@@ -33,6 +33,8 @@ pub const USAGE: &str = "\
       --fs | --no-fs       Accorde / refuse l'accès fichiers sans le demander
                            (défaut : demandé si stdin est un terminal, sinon refusé)
   -f, --file CHEMIN        Joint un fichier au premier message (répétable)
+      --provider <zcode|claude_code|codex>
+                           Fournisseur pour cette session (chat.toml inchangé)
   -v, --verbose            Résultats d'outils complets
       --color | --no-color Force / désactive les couleurs (NO_COLOR respecté)
 ";
@@ -47,6 +49,7 @@ pub struct Options {
     pub verbose: bool,
     pub color: Option<bool>,
     pub files: Vec<PathBuf>,
+    pub provider: Option<crate::chat_config::Provider>,
     pub message: Option<String>,
 }
 
@@ -64,6 +67,19 @@ pub fn parse_args(args: &[String]) -> anyhow::Result<Options> {
             "-f" | "--file" => {
                 let path = iter.next().context("--file attend un chemin")?;
                 options.files.push(expand_home(path));
+            }
+            "--provider" => {
+                let value = iter
+                    .next()
+                    .context("--provider attend une valeur : zcode, claude_code ou codex")?;
+                options.provider =
+                    Some(crate::chat_config::Provider::parse(value).map_err(anyhow::Error::msg)?);
+            }
+            flag if flag.starts_with("--provider=") => {
+                options.provider = Some(
+                    crate::chat_config::Provider::parse(&flag["--provider=".len()..])
+                        .map_err(anyhow::Error::msg)?,
+                );
             }
             "--" => {
                 words.extend(iter.by_ref().cloned());
@@ -613,8 +629,11 @@ fn attachment(path: PathBuf, terminal: &Terminal) -> Option<PathBuf> {
 /// Point d'entrée de `hyprpanel-chat cli` ; renvoie le code de sortie.
 pub fn run(args: &[String]) -> anyhow::Result<i32> {
     let options = parse_args(args)?;
-    let (cfg, _) =
+    let (mut cfg, _) =
         ChatConfig::load_or_init().map_err(|e| anyhow::anyhow!("configuration du chat : {e}"))?;
+    if let Some(provider) = options.provider {
+        cfg = cfg.with_session_provider(provider);
+    }
     let filesystem = crate::build_filesystem(&cfg)?;
     let stdin_is_terminal = std::io::stdin().is_terminal();
 
@@ -832,6 +851,24 @@ mod tests {
         assert_eq!(parse_args(&[]).unwrap(), Options::default());
         assert!(parse_args(&args(&["--inconnue"])).is_err());
         assert!(parse_args(&args(&["--file"])).is_err());
+    }
+
+    #[test]
+    fn arguments_provider() {
+        use crate::chat_config::Provider;
+        let parsed = parse_args(&args(&["--provider", "codex", "bonjour"])).unwrap();
+        assert_eq!(parsed.provider, Some(Provider::Codex));
+        assert_eq!(parsed.message.as_deref(), Some("bonjour"));
+        let parsed = parse_args(&args(&["--provider=claude_code"])).unwrap();
+        assert_eq!(parsed.provider, Some(Provider::ClaudeCode));
+        assert_eq!(parsed.message, None);
+        let error = parse_args(&args(&["--provider", "gpt"])).unwrap_err();
+        assert!(error.to_string().contains("gpt"));
+        assert!(parse_args(&args(&["--provider"])).is_err());
+        // Après « -- », --provider fait partie du message.
+        let parsed = parse_args(&args(&["--", "--provider", "codex"])).unwrap();
+        assert_eq!(parsed.provider, None);
+        assert_eq!(parsed.message.as_deref(), Some("--provider codex"));
     }
 
     #[test]

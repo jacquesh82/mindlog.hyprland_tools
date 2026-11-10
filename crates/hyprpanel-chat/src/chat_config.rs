@@ -34,6 +34,22 @@ impl Provider {
             _ => None,
         }
     }
+    /// Valeurs acceptées par `--provider` (noms snake_case de l'enum).
+    pub const NAMES: [&'static str; 3] = ["zcode", "claude_code", "codex"];
+
+    /// Analyse une valeur de `--provider` ; message d'erreur prêt à afficher.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value.trim() {
+            "zcode" => Ok(Self::Zcode),
+            "claude_code" => Ok(Self::ClaudeCode),
+            "codex" => Ok(Self::Codex),
+            other => Err(format!(
+                "fournisseur inconnu : « {other} » (valeurs acceptées : {})",
+                Self::NAMES.join(", ")
+            )),
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Zcode => "Zcode",
@@ -52,11 +68,10 @@ pub struct ChatConfig {
     pub claude_model: String,
     #[serde(default)]
     pub codex_model: String,
-    /// Vide = rôle LYRA par défaut ; sinon remplace ce rôle pour les trois modes.
+    /// Consignes personnalisées communes aux trois fournisseurs : elles
+    /// complètent le rôle de LYRA, sans remplacer son identité ni ses règles.
     #[serde(default)]
     pub system_context: String,
-    #[serde(default = "default_scope_limit")]
-    pub limit_wayland_scope: bool,
     #[serde(default = "default_memory_enabled")]
     pub memory_enabled: bool,
     #[serde(default)]
@@ -72,9 +87,30 @@ pub struct ChatConfig {
     pub animate_avatar: bool,
     /// Optionnel ; sinon composé depuis la config du daemon (port + jeton).
     pub mcp_url: Option<String>,
+    /// Fournisseur lu dans `chat.toml` quand `--provider` l'a remplacé pour
+    /// la session : c'est lui que `save()` réécrit, jamais le choix de session.
+    #[serde(skip)]
+    pub persisted_provider: Option<Provider>,
 }
 
 impl ChatConfig {
+    /// Choix de fournisseur pour la session (`--provider`) : remplace
+    /// `provider` en mémoire sans changer ce que `save()` écrit.
+    pub fn with_session_provider(mut self, provider: Provider) -> Self {
+        if self.provider != provider {
+            self.persisted_provider.get_or_insert(self.provider);
+            self.provider = provider;
+        }
+        self
+    }
+
+    /// Choix explicite de l'utilisateur (sélecteur de la fenêtre) : il est
+    /// enregistré et met fin à la surcharge de session.
+    pub fn choose_provider(&mut self, provider: Provider) {
+        self.provider = provider;
+        self.persisted_provider = None;
+    }
+
     pub fn validate_subscription(&self) -> Result<(), String> {
         if self.provider == Provider::Zcode
             && self.base_url.trim_end_matches('/') != ZCODE_SUBSCRIPTION_URL
@@ -117,10 +153,6 @@ fn default_animate_avatar() -> bool {
     true
 }
 
-fn default_scope_limit() -> bool {
-    true
-}
-
 fn default_memory_enabled() -> bool {
     true
 }
@@ -155,9 +187,8 @@ impl ChatConfig {
             claude_model: String::new(),
             codex_model: String::new(),
             system_context: String::new(),
-            limit_wayland_scope: true,
             memory_enabled: true,
-            operation_mode: crate::operations::Mode::ConfirmAll,
+            operation_mode: crate::operations::Mode::ConfirmOnce,
             base_url: ZCODE_SUBSCRIPTION_URL.into(),
             api_key: String::new(),
             model: "GLM-5.3".into(),
@@ -165,6 +196,7 @@ impl ChatConfig {
             language: "fr".into(),
             animate_avatar: true,
             mcp_url: None,
+            persisted_provider: None,
         }
     }
 
@@ -213,7 +245,14 @@ impl ChatConfig {
     }
 
     pub fn as_toml(&self) -> String {
-        toml::to_string_pretty(self).unwrap_or_default()
+        match self.persisted_provider {
+            Some(provider) => {
+                let mut on_disk = self.clone();
+                on_disk.provider = provider;
+                toml::to_string_pretty(&on_disk).unwrap_or_default()
+            }
+            None => toml::to_string_pretty(self).unwrap_or_default(),
+        }
     }
 
     /// URL MCP effective : `mcp_url` si définie, sinon composée depuis les
@@ -259,6 +298,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_parse_accepte_les_noms_snake_case_et_refuse_le_reste() {
+        assert_eq!(Provider::parse("zcode"), Ok(Provider::Zcode));
+        assert_eq!(Provider::parse("claude_code"), Ok(Provider::ClaudeCode));
+        assert_eq!(Provider::parse("codex"), Ok(Provider::Codex));
+        let error = Provider::parse("gpt").unwrap_err();
+        assert!(error.contains("gpt") && error.contains("claude_code"));
+        assert!(Provider::parse("Codex").is_err());
+        assert!(Provider::parse("").is_err());
+        // Les noms acceptés sont exactement ceux de la sérialisation TOML.
+        for name in Provider::NAMES {
+            let provider = Provider::parse(name).unwrap();
+            let toml = toml::to_string(&serde_json::json!({ "p": provider })).unwrap();
+            assert_eq!(toml.trim(), format!("p = \"{name}\""));
+        }
+    }
+
+    #[test]
+    fn fournisseur_de_session_ne_reecrit_pas_chat_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chat.toml");
+        let original = ChatConfig::defaults();
+        std::fs::write(&path, original.as_toml()).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let session = toml::from_str::<ChatConfig>(&before)
+            .unwrap()
+            .with_session_provider(Provider::Codex);
+        assert_eq!(session.provider, Provider::Codex);
+        // Ce que save() écrirait reste identique au fichier lu.
+        assert_eq!(session.as_toml(), before);
+        // Un réglage modifié pendant la session garde le fournisseur du fichier.
+        let mut edited = session.clone();
+        edited.max_tokens = 4096;
+        let reread = toml::from_str::<ChatConfig>(&edited.as_toml()).unwrap();
+        assert_eq!(reread.provider, Provider::Zcode);
+        assert_eq!(reread.max_tokens, 4096);
+        // Le sélecteur de la fenêtre est un choix explicite : il est enregistré.
+        let mut chosen = session;
+        chosen.choose_provider(Provider::ClaudeCode);
+        let reread = toml::from_str::<ChatConfig>(&chosen.as_toml()).unwrap();
+        assert_eq!(reread.provider, Provider::ClaudeCode);
+        // Même fournisseur que le fichier : aucune surcharge.
+        let same = ChatConfig::defaults().with_session_provider(Provider::Zcode);
+        assert!(same.persisted_provider.is_none());
+    }
+
+    #[test]
     fn execution_mode_migrates_safely_and_roundtrips_all_choices() {
         use crate::operations::Mode;
         let mut cfg = ChatConfig::defaults();
@@ -270,10 +356,10 @@ mod tests {
             .join("\n");
         assert_eq!(
             toml::from_str::<ChatConfig>(&old).unwrap().operation_mode,
-            Mode::ConfirmAll
+            Mode::ConfirmOnce
         );
         for mode in [
-            Mode::ConfirmAll,
+            Mode::ConfirmOnce,
             Mode::FullAccess,
             Mode::SudoOnly,
             Mode::CopyOnly,
@@ -427,24 +513,12 @@ mod tests {
     }
 }
 #[test]
-fn wayland_scope_defaults_on_for_old_configs_and_can_be_disabled() {
-    let mut cfg = ChatConfig::defaults();
-    assert!(cfg.limit_wayland_scope);
-    let old = cfg
-        .as_toml()
-        .lines()
-        .filter(|line| !line.starts_with("limit_wayland_scope"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        toml::from_str::<ChatConfig>(&old)
-            .unwrap()
-            .limit_wayland_scope
+fn old_configs_with_wayland_scope_still_load() {
+    // L'option de périmètre a disparu : une ancienne config la contient encore.
+    let old = format!(
+        "limit_wayland_scope = true\n{}",
+        ChatConfig::defaults().as_toml()
     );
-    cfg.limit_wayland_scope = false;
-    assert!(
-        !toml::from_str::<ChatConfig>(&cfg.as_toml())
-            .unwrap()
-            .limit_wayland_scope
-    );
+    let cfg = toml::from_str::<ChatConfig>(&old).unwrap();
+    assert!(!cfg.as_toml().contains("limit_wayland_scope"));
 }

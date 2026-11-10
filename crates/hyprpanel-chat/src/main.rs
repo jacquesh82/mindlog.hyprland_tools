@@ -9,10 +9,12 @@ mod choices;
 mod cli;
 mod clipboard;
 mod commands;
+mod context_d;
 mod contrast;
 mod environment;
 mod filesystem;
 mod i18n;
+mod identity;
 mod inventory;
 mod mcp;
 mod memory;
@@ -20,7 +22,6 @@ mod operations;
 mod providers;
 mod reliability;
 mod rich_text;
-mod scope;
 mod ui;
 mod web;
 
@@ -29,21 +30,62 @@ use anyhow::Context;
 slint::include_modules!();
 
 const USAGE: &str = "\
-LYRA — assistante de configuration Wayland (hyprpanel-chat)
+LYRA — agente de bureau Linux (hyprpanel-chat)
 
 USAGE
   hyprpanel-chat           Ouvre la fenêtre (config chargée/créée si absente)
+  hyprpanel-chat --provider <zcode|claude_code|codex>
+                           Ouvre la fenêtre avec ce fournisseur pour la
+                           session, sans réécrire chat.toml (le sélecteur
+                           reste disponible)
   hyprpanel-chat init      Crée ~/.config/hyprpanel/chat.toml (clé reprise de
                            la config Zcode si disponible) et affiche l'état
   hyprpanel-chat --help    Cette aide
-  hyprpanel-chat check-providers [--live] [--scope] [--policy]
+  hyprpanel-chat check-providers [--live] [--policy]
                            Vérifie les connexions ; --live teste les trois
                            abonnements et les choix sans modifier le bureau
-                           --scope teste le périmètre par de vrais appels
                            --policy teste les demandes web et commandes,
                            sans exécuter les outils proposés
   hyprpanel-chat check-web Teste la lecture HTTPS du wiki officiel Hyprland
+
+CONTEXTES D'AUTRES APPLICATIONS
+  Les fichiers *.md de $XDG_CONFIG_HOME/hyprpanel/context.d/ (défaut
+  ~/.config/hyprpanel/context.d/) sont ajoutés au contexte système, par ordre
+  alphabétique, relus à chaque conversation : informations sur le bureau,
+  jamais des instructions (16 Kio par fichier, 48 Kio au total).
+
+FENÊTRE
+  app_id Wayland : lyra (règles Hyprland : class = lyra)
 ";
+
+/// Identifiant Wayland (`app_id`) de la fenêtre : la classe vue par Hyprland.
+const APP_ID: &str = "lyra";
+
+/// Options du mode fenêtre (sans sous-commande).
+#[derive(Debug, Default, PartialEq)]
+struct WindowOptions {
+    provider: Option<chat_config::Provider>,
+}
+
+/// Analyse les arguments du mode fenêtre — pur, testé.
+fn parse_window_args(args: &[String]) -> Result<WindowOptions, String> {
+    let mut options = WindowOptions::default();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let value = match arg.as_str() {
+            "--provider" => iter
+                .next()
+                .ok_or("--provider attend une valeur : zcode, claude_code ou codex")?
+                .as_str(),
+            flag => match flag.strip_prefix("--provider=") {
+                Some(value) => value,
+                None => return Err(format!("argument inconnu : {flag}")),
+            },
+        };
+        options.provider = Some(chat_config::Provider::parse(value)?);
+    }
+    Ok(options)
+}
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -62,7 +104,6 @@ fn main() -> anyhow::Result<()> {
             return tokio::runtime::Runtime::new()?.block_on(providers::diagnose(
                 &cfg,
                 args.iter().any(|a| a == "--live"),
-                args.iter().any(|a| a == "--scope"),
                 args.iter().any(|a| a == "--policy"),
             ));
         }
@@ -85,23 +126,33 @@ fn main() -> anyhow::Result<()> {
             print!("{USAGE}{}", cli::USAGE);
             return Ok(());
         }
-        Some(other) => {
-            eprintln!("argument inconnu : {other}\n\n{USAGE}");
+        _ => {}
+    }
+    let options = match parse_window_args(&args) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("{error}\n\n{USAGE}");
             std::process::exit(2);
         }
-        None => {}
-    }
+    };
 
-    let (cfg, _) = chat_config::ChatConfig::load_or_init()
+    let (mut cfg, _) = chat_config::ChatConfig::load_or_init()
         .map_err(|e| anyhow::anyhow!("configuration du chat : {e}"))?;
+    if let Some(provider) = options.provider {
+        cfg = cfg.with_session_provider(provider);
+    }
     let filesystem = build_filesystem(&cfg)?;
 
+    // Le backend Slint est initialisé par la création du composant ; l'app_id
+    // doit être posé ensuite, avant l'affichage (sinon Hyprland voit une classe vide).
     let app = ChatWindow::new().context("création de la fenêtre (session Wayland active ?)")?;
+    if let Err(error) = slint::set_xdg_app_id(APP_ID) {
+        eprintln!("app_id Wayland non défini : {error}");
+    }
     avatar::install(&app);
     app.set_provider_index(cfg.provider.index());
     app.set_model_label(cfg.model_label().into());
     app.set_animations_enabled(cfg.animate_avatar);
-    app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
     app.set_cfg_memory_enabled(cfg.memory_enabled);
     app.set_cfg_operation_mode(cfg.operation_mode.index());
     app.set_operations_allowed(cfg.operation_mode.can_operate());
@@ -297,6 +348,26 @@ fn main() -> anyhow::Result<()> {
         let weak_settings = app.as_weak();
         let cfg_for_settings = std::sync::Arc::new(std::sync::Mutex::new(cfg.clone()));
         let cfg_for_provider = cfg_for_settings.clone();
+        // Repli de session décidé par l'agent : sélecteur et copie de la
+        // config suivent, sans écrire chat.toml.
+        let cfg_for_fallback = cfg_for_settings.clone();
+        let weak_fallback = app.as_weak();
+        app.on_provider_fallback(move |index| {
+            let (Some(provider), Some(app)) = (
+                chat_config::Provider::from_index(index),
+                weak_fallback.upgrade(),
+            ) else {
+                return;
+            };
+            let mut saved = cfg_for_fallback.lock().expect("cfg empoisonnée");
+            *saved = saved.clone().with_session_provider(provider);
+            app.set_provider_index(index);
+            app.set_model_label(saved.model_label().into());
+        });
+        let tx_recheck = tx.clone();
+        app.on_recheck_providers(move || {
+            let _ = tx_recheck.send(agent::UserEvent::RecheckProviders);
+        });
         let tx_provider = tx.clone();
         let weak_provider = app.as_weak();
         app.on_provider_selected(move |index| {
@@ -312,7 +383,7 @@ fn main() -> anyhow::Result<()> {
                 return;
             };
             let mut next = saved.clone();
-            next.provider = provider;
+            next.choose_provider(provider);
             if let Err(error) = next.save() {
                 app.set_provider_index(saved.provider.index());
                 ui::append(&weak_provider, "error", format!("config : {error}"));
@@ -336,7 +407,6 @@ fn main() -> anyhow::Result<()> {
                 app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
                 app.set_cfg_api_key(cfg.api_key.clone().into());
                 app.set_cfg_animate_avatar(cfg.animate_avatar);
-                app.set_cfg_limit_wayland_scope(cfg.limit_wayland_scope);
                 app.set_cfg_memory_enabled(cfg.memory_enabled);
                 app.set_cfg_operation_mode(cfg.operation_mode.index());
                 app.set_cfg_system_context(cfg.system_context.clone().into());
@@ -358,7 +428,6 @@ fn main() -> anyhow::Result<()> {
                 "fr".into()
             };
             cfg.animate_avatar = app.get_cfg_animate_avatar();
-            cfg.limit_wayland_scope = app.get_cfg_limit_wayland_scope();
             cfg.memory_enabled = app.get_cfg_memory_enabled();
             let Some(mode) = operations::Mode::from_index(app.get_cfg_operation_mode()) else {
                 return;
@@ -577,8 +646,8 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Accès fichiers commun à la fenêtre et à la CLI : réglages et données
-/// LYRA protégés, mode d'exécution de la config.
+/// Accès fichiers commun à la fenêtre et à la CLI : dossier personnel,
+/// identifiants, réglages et données LYRA protégés, mode d'exécution de la config.
 pub(crate) fn build_filesystem(
     cfg: &chat_config::ChatConfig,
 ) -> anyhow::Result<std::sync::Arc<filesystem::FilesystemAccess>> {
@@ -586,17 +655,21 @@ pub(crate) fn build_filesystem(
         .parent()
         .context("dossier de données")?
         .to_path_buf();
-    let filesystem = filesystem::FilesystemAccess::new(
-        filesystem::FilesystemAccess::default_root(),
-        data_dir.join("file-backups"),
-    )
-    .protect_directory(
-        chat_config::config_path()
-            .parent()
-            .context("dossier des réglages")?
-            .to_path_buf(),
-    )
-    .protect_directory(data_dir);
+    let home = filesystem::FilesystemAccess::default_root();
+    let mut filesystem =
+        filesystem::FilesystemAccess::new(home.clone(), data_dir.join("file-backups"))
+            .with_config_dir(home.join(".config"));
+    for path in filesystem::FilesystemAccess::sensitive_directories(&home) {
+        filesystem = filesystem.protect_directory(path);
+    }
+    let filesystem = filesystem
+        .protect_directory(
+            chat_config::config_path()
+                .parent()
+                .context("dossier des réglages")?
+                .to_path_buf(),
+        )
+        .protect_directory(data_dir);
     filesystem.set_operation_mode(cfg.operation_mode);
     Ok(std::sync::Arc::new(filesystem))
 }
@@ -621,5 +694,45 @@ fn cmd_init() -> anyhow::Result<()> {
             Ok(())
         }
         Err(e) => anyhow::bail!("init impossible : {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chat_config::Provider;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn arguments_fenetre_provider() {
+        assert_eq!(parse_window_args(&[]), Ok(WindowOptions::default()));
+        assert_eq!(
+            parse_window_args(&args(&["--provider", "codex"]))
+                .unwrap()
+                .provider,
+            Some(Provider::Codex)
+        );
+        assert_eq!(
+            parse_window_args(&args(&["--provider=claude_code"]))
+                .unwrap()
+                .provider,
+            Some(Provider::ClaudeCode)
+        );
+        let error = parse_window_args(&args(&["--provider", "gpt"])).unwrap_err();
+        assert!(error.contains("gpt"));
+        assert!(parse_window_args(&args(&["--provider"])).is_err());
+        assert!(parse_window_args(&args(&["--inconnue"])).is_err());
+    }
+
+    #[test]
+    fn aide_mentionne_provider_et_context_d() {
+        for text in [USAGE, cli::USAGE] {
+            assert!(text.contains("--provider"));
+        }
+        assert!(USAGE.contains("context.d"));
+        assert!(USAGE.contains(APP_ID));
     }
 }

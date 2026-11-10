@@ -337,12 +337,7 @@ fn main() -> anyhow::Result<()> {
         1080,
         800,
     )?;
-    click(&app, 300., 160.);
-    assert!(
-        !app.get_cfg_limit_wayland_scope(),
-        "le périmètre doit rester modifiable dans Assistant"
-    );
-    click(&app, 400., 255.);
+    click(&app, 400., 190.);
     app.window().dispatch_event(WindowEvent::KeyPressed {
         text: slint::platform::Key::Control.into(),
     });

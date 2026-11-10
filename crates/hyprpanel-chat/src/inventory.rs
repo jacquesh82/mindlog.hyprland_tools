@@ -1098,7 +1098,7 @@ pub fn discover_with_progress(
         d.record("portage", "database_read", packages, None);
     }
     fs.require_approval()?;
-    let root = fs.inventory_path(fs.root())?;
+    let root = fs.inventory_path(fs.config_dir())?;
     let mut queue = vec![(root.clone(), 0)];
     let mut visited = BTreeSet::new();
     let mut count = 0;

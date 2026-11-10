@@ -1,5 +1,6 @@
-//! Accès explicite de l'assistant aux configurations. Les fournisseurs utilisent
-//! les mêmes outils locaux ; leurs shells et outils fichiers natifs restent fermés.
+//! Accès explicite de l'assistant aux fichiers du dossier personnel. Les
+//! fournisseurs utilisent les mêmes outils locaux ; leurs shells et outils
+//! fichiers natifs restent fermés. Les dossiers d'identifiants sont protégés.
 
 use anyhow::{Context, bail, ensure};
 use langchain_rust::schemas::FunctionDefinition;
@@ -18,6 +19,8 @@ const MAX_TEXT_BYTES: usize = 64 * 1024;
 
 pub struct FilesystemAccess {
     root: PathBuf,
+    /// Dossier des configurations (inventaire de l'environnement).
+    config_dir: PathBuf,
     backups: PathBuf,
     private_directories: Vec<PathBuf>,
     approved: AtomicBool,
@@ -25,13 +28,46 @@ pub struct FilesystemAccess {
 }
 
 impl FilesystemAccess {
+    /// Dossier personnel : LYRA travaille sur tous les fichiers de l'utilisateur.
     pub fn default_root() -> PathBuf {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into())).join(".config")
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
+    }
+
+    /// Identifiants et secrets du dossier personnel, jamais exposés aux outils
+    /// fichiers (le shell garde les droits du compte, sous confirmation).
+    pub fn sensitive_directories(home: &Path) -> Vec<PathBuf> {
+        [
+            ".ssh",
+            ".gnupg",
+            ".password-store",
+            ".local/share/keyrings",
+            ".pki",
+            ".aws",
+            ".azure",
+            ".kube",
+            ".docker",
+            ".netrc",
+            ".git-credentials",
+            ".zcode",
+            ".codex",
+            ".claude",
+            ".claude.json",
+            ".config/gh",
+            ".config/gcloud",
+            ".mozilla",
+            ".config/BraveSoftware/Brave-Browser/Default",
+            ".config/chromium/Default",
+            ".config/google-chrome/Default",
+        ]
+        .iter()
+        .map(|relative| home.join(relative))
+        .collect()
     }
 
     pub fn new(root: PathBuf, backups: PathBuf) -> Self {
         let private_directories = vec![root.join("hyprpanel")];
         Self {
+            config_dir: root.clone(),
             root,
             backups,
             private_directories,
@@ -43,6 +79,16 @@ impl FilesystemAccess {
     pub fn protect_directory(mut self, path: PathBuf) -> Self {
         self.private_directories.push(path);
         self
+    }
+
+    /// Dossier des configurations, s'il diffère de la racine (`~/.config`).
+    pub fn with_config_dir(mut self, path: PathBuf) -> Self {
+        self.config_dir = path;
+        self
+    }
+
+    pub fn config_dir(&self) -> &Path {
+        &self.config_dir
     }
 
     pub fn root(&self) -> &Path {
@@ -107,11 +153,12 @@ impl FilesystemAccess {
         let root = self
             .root
             .canonicalize()
-            .context("dossier de configuration inaccessible")?;
+            .context("dossier autorisé inaccessible")?;
+        // « ~ » désigne la racine autorisée : le dossier personnel.
         let alias;
-        let input = if input == "~/.config" {
+        let input = if input == "~" {
             self.root.as_path()
-        } else if let Some(relative) = input.strip_prefix("~/.config/") {
+        } else if let Some(relative) = input.strip_prefix("~/") {
             alias = self.root.join(relative);
             alias.as_path()
         } else {
@@ -149,7 +196,7 @@ impl FilesystemAccess {
                         .canonicalize()
                         .ok()
                         .is_some_and(|p| target.starts_with(p)),
-                "les fichiers privés de LYRA (clés, jetons et réglages) ne sont pas accessibles à l'assistant"
+                "fichier protégé : identifiants, clés, jetons ou réglages privés de LYRA ne sont pas accessibles à l'assistant"
             );
         }
         Ok(target)
@@ -316,17 +363,17 @@ impl FilesystemAccess {
         let mut definitions = vec![
             FunctionDefinition::new(
                 LIST_TOOL,
-                "Liste un dossier dans ~/.config (200 entrées maximum). Aucun fichier privé de LYRA n'est exposé.",
-                json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Chemin relatif à ~/.config, ou chemin absolu dans ce dossier. Utilisez . pour sa racine."}}}),
+                "Liste un dossier du dossier personnel (~, 200 entrées maximum). Les identifiants et fichiers privés de LYRA ne sont pas exposés.",
+                json!({"type":"object","required":["path"],"properties":{"path":{"type":"string","description":"Chemin relatif au dossier personnel, ~/…, ou chemin absolu dans ce dossier. Utilisez . pour sa racine."}}}),
             ),
             FunctionDefinition::new(
                 READ_TOOL,
-                "Lit un fichier de configuration UTF-8 dans ~/.config, 64 Kio maximum, et renvoie son sha256 pour une modification ultérieure.",
+                "Lit un fichier texte UTF-8 du dossier personnel (documents, code, notes, configuration), 64 Kio maximum, et renvoie son sha256 pour une modification ultérieure.",
                 json!({"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}),
             ),
             FunctionDefinition::new(
                 WRITE_TOOL,
-                "Écrit un fichier UTF-8 dans ~/.config après demande explicite de l'utilisateur. Relisez le fichier et fournissez son sha256 actuel ; utilisez new pour un nouveau fichier dans un dossier existant. Une sauvegarde précède tout remplacement. monitors.lua/inputs.lua et les fichiers privés de LYRA sont protégés.",
+                "Écrit un fichier UTF-8 dans le dossier personnel après demande explicite de l'utilisateur. Relisez le fichier et fournissez son sha256 actuel ; utilisez new pour un nouveau fichier dans un dossier existant. Une sauvegarde précède tout remplacement. monitors.lua/inputs.lua et les fichiers privés de LYRA sont protégés.",
                 json!({"type":"object","required":["path","content","expected_sha256"],"properties":{"path":{"type":"string"},"content":{"type":"string"},"expected_sha256":{"type":"string"}}}),
             ),
         ];
@@ -385,6 +432,42 @@ mod tests {
     }
 
     #[test]
+    fn credentials_in_home_stay_protected() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(home.join("Documents")).unwrap();
+        std::fs::write(home.join(".ssh/id_ed25519"), "secret").unwrap();
+        std::fs::write(home.join(".netrc"), "secret").unwrap();
+        std::fs::write(home.join("Documents/notes.md"), "# notes").unwrap();
+        let mut access = FilesystemAccess::new(home.clone(), dir.path().join("backups"));
+        for path in FilesystemAccess::sensitive_directories(&home) {
+            access = access.protect_directory(path);
+        }
+        access.set_approved(true);
+        assert_eq!(
+            access
+                .call(READ_TOOL, &json!({"path":"~/Documents/notes.md"}))
+                .unwrap()["content"],
+            "# notes"
+        );
+        for path in ["~/.ssh/id_ed25519", ".netrc", "~/.ssh"] {
+            assert!(
+                access.call(READ_TOOL, &json!({"path":path})).is_err(),
+                "{path}"
+            );
+        }
+        let listing = access.call(LIST_TOOL, &json!({"path":"~"})).unwrap();
+        let names: Vec<_> = listing["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["Documents"]);
+    }
+
+    #[test]
     fn consent_is_required_and_revocation_blocks_all_tools() {
         let (_dir, access) = fixture();
         std::fs::write(access.root.join("waybar.json"), "{}").unwrap();
@@ -408,7 +491,7 @@ mod tests {
         assert_eq!(access.tool_definitions().len(), 3);
         assert_eq!(
             access
-                .call(READ_TOOL, &json!({"path":"~/.config/waybar.json"}))
+                .call(READ_TOOL, &json!({"path":"~/waybar.json"}))
                 .unwrap()["content"],
             "{}"
         );

@@ -237,6 +237,13 @@ mod tests {
         for background in ["canvas", "panel", "raised"] {
             assert!(get_contrast_ratio(tokens[background], tokens["muted"]) >= 4.5);
         }
+        // États du panneau des fournisseurs (texte 13–14 px : AA normal).
+        for background in ["canvas", "panel", "raised"] {
+            for foreground in ["success", "danger"] {
+                let ratio = get_contrast_ratio(tokens[background], tokens[foreground]);
+                assert!(ratio >= 4.5, "{foreground} / {background}: {ratio}");
+            }
+        }
         for background in ["accent", "primary-hover", "primary-pressed"] {
             assert!(
                 get_contrast_ratio(tokens[background], tokens["on-primary"]) >= 7.,

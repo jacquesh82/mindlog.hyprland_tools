@@ -32,7 +32,7 @@ pub fn path() -> PathBuf {
     crate::chat_config::state_history_path().with_file_name("environment.json")
 }
 
-fn read_small(path: &Path) -> Option<String> {
+pub(crate) fn read_small(path: &Path) -> Option<String> {
     let mut text = String::new();
     std::fs::File::open(path)
         .ok()?
@@ -42,7 +42,7 @@ fn read_small(path: &Path) -> Option<String> {
     Some(text)
 }
 
-fn os_release(text: &str) -> BTreeMap<String, String> {
+pub(crate) fn os_release(text: &str) -> BTreeMap<String, String> {
     text.lines()
         .filter_map(|line| {
             let (key, value) = line.split_once('=')?;
@@ -187,7 +187,7 @@ fn read_profile(path: &Path) -> Option<String> {
 
 pub fn context(approved: bool) -> String {
     if !approved {
-        return "Local environment access has not been approved. Never infer the OS, package manager or username.".into();
+        return "Detailed environment profile (packages, tools, configuration files) unavailable: filesystem access has not been approved. The identity and execution environment facts above remain valid; never guess package versions or the username.".into();
     }
     match load().and_then(|mut p| {
         let names: Vec<_> = p.desktop_tools.iter().map(|tool| tool.name.clone()).collect();

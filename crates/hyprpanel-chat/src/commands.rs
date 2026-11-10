@@ -1,10 +1,13 @@
-//! Exécution selon la politique choisie ; chaque confirmation porte sur le contenu exact.
-use crate::{filesystem::FilesystemAccess, ui::Front};
+//! Exécution selon la politique choisie. Un accord ordinaire est mémorisé pour
+//! la session (par programmes, ou commande exacte si elle est opaque) ; une
+//! commande dangereuse est confirmée à chaque fois.
+use crate::{filesystem::FilesystemAccess, operations::Confirmation, ui::Front};
 use anyhow::{Context, ensure};
 use langchain_rust::schemas::FunctionDefinition;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     future::Future,
     process::Stdio,
     sync::{
@@ -26,9 +29,62 @@ struct Pending {
 pub struct Approvals {
     pending: Arc<Mutex<Option<Pending>>>,
     next: Arc<AtomicI32>,
+    /// Clés déjà accordées pendant la session (`operations::command_key`…).
+    granted: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Approvals {
+    /// Vrai si cette clé a déjà été accordée pendant la session.
+    pub fn granted(&self, key: &str) -> bool {
+        self.granted
+            .lock()
+            .expect("accords empoisonnés")
+            .contains(key)
+    }
+
+    fn grant(&self, key: &str) {
+        self.granted
+            .lock()
+            .expect("accords empoisonnés")
+            .insert(key.to_string());
+    }
+
+    /// Applique une politique de confirmation : rien à demander, accord
+    /// mémorisé, ou demande native (la note précise la portée de l'accord).
+    pub async fn confirm(
+        &self,
+        front: &Front,
+        requirement: Confirmation,
+        details: String,
+        reason: String,
+        translations: &crate::i18n::Tr,
+    ) -> bool {
+        match requirement {
+            Confirmation::None => true,
+            Confirmation::Once(key) if self.granted(&key) => true,
+            Confirmation::Once(key) => {
+                let label = key
+                    .split_once(" : ")
+                    .map(|(_, v)| v)
+                    .unwrap_or(&key)
+                    .to_string();
+                let reason = format!(
+                    "{reason}\n\n{}",
+                    translations.command_once.replace("{}", &label)
+                );
+                let approved = self.request(front, details, reason).await;
+                if approved {
+                    self.grant(&key);
+                }
+                approved
+            }
+            Confirmation::Always => {
+                let reason = format!("{reason}\n\n{}", translations.command_always);
+                self.request(front, details, reason).await
+            }
+        }
+    }
+
     fn begin(&self) -> anyhow::Result<(i32, oneshot::Receiver<bool>)> {
         let mut pending = self.pending.lock().expect("confirmation empoisonnée");
         ensure!(pending.is_none(), "une confirmation est déjà en attente");

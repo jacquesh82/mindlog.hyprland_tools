@@ -36,6 +36,13 @@ export struct HistoryRow {
 }
 
 // Dictionnaire i18n complet (FR/EN) — rempli par src/i18n.rs.
+/// État d'un fournisseur affiché quand aucun n'est utilisable.
+export struct ProviderStatusRow {
+    name: string,
+    ready: bool,
+    detail: string,
+}
+
 export struct TrTexts {
     send: string, cancel: string, save: string, close: string, new-chat: string,
     status-starting: string, status-thinking: string, status-writing: string, placeholder: string, attach: string,
@@ -54,7 +61,6 @@ export struct TrTexts {
     tab-general: string, tab-access: string, tab-assistant: string, tab-memory: string,
     operation-title: string, operation-confirm: string, operation-full: string, operation-sudo: string, operation-copy: string,
     operation-confirm-hint: string, operation-full-hint: string, operation-sudo-hint: string, operation-copy-hint: string,
-    settings-scope: string, settings-scope-hint: string,
     memory-title: string, memory-hint: string, memory-clear: string, memory-confirm: string, memory-cleared: string,
     settings-context: string, settings-context-hint: string, settings-context-invalid: string,
     fs-title: string, fs-body: string, fs-note: string, fs-allow: string, fs-refuse: string,
@@ -71,11 +77,12 @@ export struct TrTexts {
     show-tool-details: string, hide-tool-details: string, status-tools: string,
     choice-done: string, choice-skipped: string, choice-selected: string, preview-missing: string,
     new-conversation: string, mcp-unavailable: string, mcp-tools: string,
+    providers-title: string, providers-intro: string, providers-recheck: string, providers-settings: string, providers-checking: string,
 }
 
 
 export component ChatWindow inherits Window {
-    title: "LYRA — configuration Wayland";
+    title: "LYRA — agente de bureau";
     background: Theme.canvas;
     default-font-family: "sans-serif";
     default-font-size: 14px;
@@ -91,6 +98,10 @@ export component ChatWindow inherits Window {
     in-out property <string> model-label: "";
     in-out property <int> provider-index: 0;
     in-out property <bool> busy: false;
+    // Faux tant qu'aucun fournisseur n'est utilisable : Envoyer est bloqué.
+    in-out property <bool> providers-ready: true;
+    in-out property <bool> providers-checking: false;
+    in-out property <[ProviderStatusRow]> provider-status;
     in-out property <string> activity: "thinking";
     in-out property <string> task-label;
     in-out property <float> task-progress: 0;
@@ -113,7 +124,6 @@ export component ChatWindow inherits Window {
     in-out property <string> cfg-api-key: "";
     in-out property <string> settings-error;
     in-out property <bool> cfg-animate-avatar: true;
-    in-out property <bool> cfg-limit-wayland-scope: true;
     in-out property <bool> cfg-memory-enabled: true;
     in-out property <int> cfg-operation-mode: 0;
     in-out property <int> settings-tab: 0;
@@ -152,6 +162,9 @@ export component ChatWindow inherits Window {
 
     callback send(string);
     callback provider-selected(int);
+    callback recheck-providers();
+    // Invoqué depuis Rust : fournisseur de repli choisi pour la session.
+    callback provider-fallback(int);
     callback new-conversation();
     callback attach-clicked();
     callback paste-clipboard(bool);
@@ -571,6 +584,80 @@ export component ChatWindow inherits Window {
                 }
             }
 
+            // Aucun fournisseur utilisable : état des trois et marche à suivre.
+            if !root.providers-ready: Rectangle {
+                height: providers-layout.preferred-height + 12px;
+                providers-card := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: 0px;
+                    width: root.column-width;
+                    height: providers-layout.preferred-height;
+                    background: Theme.panel;
+                    border-radius: 14px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    providers-layout := VerticalLayout {
+                        padding: 16px;
+                        spacing: 8px;
+                        Text {
+                            text: root.tr.providers-title;
+                            color: Theme.text;
+                            font-size: 16px;
+                            font-weight: 700;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: root.tr.providers-intro;
+                            color: Theme.secondary;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                        for row in root.provider-status: HorizontalLayout {
+                            spacing: 10px;
+                            Text {
+                                width: 14px;
+                                text: row.ready ? "✓" : "✗";
+                                color: row.ready ? Theme.success : Theme.danger;
+                                font-size: 14px;
+                                font-weight: 700;
+                                accessible-role: none;
+                            }
+                            Text {
+                                width: 96px;
+                                text: row.name;
+                                color: Theme.text;
+                                font-size: 13px;
+                                font-weight: 600;
+                            }
+                            Text {
+                                horizontal-stretch: 1;
+                                text: row.detail;
+                                color: row.ready ? Theme.success : Theme.secondary;
+                                font-size: 13px;
+                                wrap: word-wrap;
+                            }
+                        }
+                        HorizontalLayout {
+                            alignment: end;
+                            spacing: 10px;
+                            ActionButton {
+                                text: root.tr.providers-settings;
+                                height: 34px;
+                                enabled: root.interactive;
+                                clicked => { root.open-settings(); }
+                            }
+                            ActionButton {
+                                text: root.providers-checking ? root.tr.providers-checking : root.tr.providers-recheck;
+                                primary: true;
+                                height: 34px;
+                                enabled: root.interactive && !root.providers-checking;
+                                clicked => { root.recheck-providers(); }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Compositeur : champ large, pièces jointes et action principale visibles.
             Rectangle {
                 height: root.attachments.length > 0 ? 188px : 146px;
@@ -623,7 +710,7 @@ export component ChatWindow inherits Window {
                                 typing-timer.restart();
                             }
                             accepted(t) => {
-                                if !root.paste-in-progress && (t != "" || root.attachments.length > 0) {
+                                if root.providers-ready && !root.paste-in-progress && (t != "" || root.attachments.length > 0) {
                                     root.send(t);
                                     le.text = "";
                                 }
@@ -670,7 +757,7 @@ export component ChatWindow inherits Window {
                                 icon: @image-url("../assets/icons/arrow-up.svg");
                                 primary: true;
                                 height: 32px;
-                                enabled: root.interactive && !root.paste-in-progress && (le.text != "" || root.attachments.length > 0);
+                                enabled: root.interactive && root.providers-ready && !root.paste-in-progress && (le.text != "" || root.attachments.length > 0);
                                 clicked => {
                                     root.send(le.text);
                                     le.text = "";
@@ -944,16 +1031,6 @@ export component ChatWindow inherits Window {
                             Tab {
                                 title: root.tr.tab-assistant;
                                 SettingsPage {
-                                    CheckBox {
-                                        text: root.tr.settings-scope;
-                                        checked <=> root.cfg-limit-wayland-scope;
-                                    }
-                                    Text {
-                                        text: root.tr.settings-scope-hint;
-                                        color: Theme.secondary;
-                                        font-size: 12px;
-                                        wrap: word-wrap;
-                                    }
                                     if root.provider-index != 0: Text {
                                         text: root.tr.subscription-hint;
                                         color: Theme.secondary;
