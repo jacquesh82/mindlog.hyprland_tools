@@ -22,6 +22,7 @@ mod operations;
 mod providers;
 mod reliability;
 mod rich_text;
+mod serve;
 mod ui;
 mod web;
 
@@ -91,6 +92,14 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("init") => return cmd_init(),
+        Some("serve") => {
+            if args[1..].iter().any(|a| a == "--help" || a == "-h") {
+                print!("{}", serve::USAGE);
+                return Ok(());
+            }
+            let code = serve::run(&args[1..])?;
+            std::process::exit(code);
+        }
         Some("cli") => {
             if args[1..].iter().any(|a| a == "--help" || a == "-h") {
                 print!("{}", cli::USAGE);
@@ -123,7 +132,7 @@ fn main() -> anyhow::Result<()> {
             });
         }
         Some("--help") | Some("-h") | Some("help") => {
-            print!("{USAGE}{}", cli::USAGE);
+            print!("{USAGE}{}{}", cli::USAGE, serve::USAGE);
             return Ok(());
         }
         _ => {}
@@ -637,6 +646,7 @@ fn main() -> anyhow::Result<()> {
                 ui::Front::Window(weak),
                 filesystem,
                 approvals,
+                agent::Cancel::default(),
             ));
         })
         .context("thread agent")?;
@@ -729,9 +739,10 @@ mod tests {
 
     #[test]
     fn aide_mentionne_provider_et_context_d() {
-        for text in [USAGE, cli::USAGE] {
+        for text in [USAGE, cli::USAGE, serve::USAGE] {
             assert!(text.contains("--provider"));
         }
+        assert!(serve::USAGE.contains("hyprpanel-chat serve"));
         assert!(USAGE.contains("context.d"));
         assert!(USAGE.contains(APP_ID));
     }

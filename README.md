@@ -239,6 +239,55 @@ desktop, launches LYRA as its AI assistant. Three hooks make this work:
 `hyprpanel-chat --help` documents `--provider` and `context.d`; hyprdesk reads
 that output to detect both features.
 
+## Protocole serve (intégration hyprdesk)
+
+`hyprpanel-chat serve` lets another application (hyprdesk's side drawer) provide
+the interface while LYRA keeps the whole engine: providers, MCP, per-turn backups,
+memory, execution modes, confirmations, and `context.d`. It speaks **JSON Lines**
+on stdin/stdout (UTF-8, one JSON object per line). Nothing else is written to
+stdout; logs go to stderr. One conversation per process; closing stdin ends it
+cleanly after the messages already received are processed.
+
+```bash
+hyprpanel-chat serve [--provider <zcode|claude_code|codex>] [--fs | --no-fs]
+```
+
+**Client → LYRA** (unknown fields are ignored; an invalid line gets a non-fatal
+`error` and the session continues):
+
+| `type` | Example | Effect |
+| --- | --- | --- |
+| `hello` | `{"type":"hello","client":"hyprdesk","protocol":1,"language":"fr"}` | Required first. `protocol` must be `1` (otherwise fatal `error`, exit code 2). `language` (`fr`/`en`) applies to this session. |
+| `message` | `{"type":"message","id":"m1","text":"…","attachments":[{"path":"/…"}]}` | Starts a turn. `id` is optional (LYRA generates `m1`, `m2`…). |
+| `confirm` | `{"type":"confirm","request":"c1","accept":true}` | Answers a `confirm_request`. |
+| `choice` | `{"type":"choice","request":"q1","value":"a"}` | Answers a `choice_request` with an option `value`; starts a turn whose id is the request id. |
+| `cancel` | `{"type":"cancel"}` | Stops the current turn: running commands and the provider client are killed, the conversation returns to its state before the turn. |
+| `new_conversation` | `{"type":"new_conversation"}` | Starts an empty conversation (local memory kept per settings). |
+| `provider` | `{"type":"provider","value":"codex"}` | Switches provider for the rest of the session (`chat.toml` unchanged). |
+
+**LYRA → client**:
+
+| `type` | Example | Meaning |
+| --- | --- | --- |
+| `ready` | `{"type":"ready","protocol":1,"provider":"claude_code","providers":["zcode","claude_code","codex"],"fs":true}` | Session ready, after the provider check. `provider` is the one in use (after any fallback); `providers` lists those usable. Messages produced earlier (e.g. a daemon `error`) follow it. |
+| `turn_start` | `{"type":"turn_start","id":"m1"}` | A turn begins. |
+| `delta` | `{"type":"delta","text":"…"}` | Reply text as it is written, in Markdown. |
+| `thinking` | `{"type":"thinking","active":true}` | The model is preparing its answer. |
+| `progress` | `{"type":"progress","phase":"…","fraction":0.4}` | Long operation; `fraction` is `null` when unknown. |
+| `tool` | `{"type":"tool","id":"t1","name":"…","summary":"…","status":"running"}` | Tool call; a second event with `done` or `error` adds a short `result`. |
+| `confirm_request` | `{"type":"confirm_request","id":"c1","command":"…","reason":"…","risk":"low"}` | Waits for `confirm`. `risk` is `high` for dangerous commands (asked every time) and `low` for a once-per-session approval. Never accepted by default: without an answer it stays pending; once stdin is closed it is declined. |
+| `choice_request` | `{"type":"choice_request","id":"q1","kind":"color","prompt":"…","options":[{"label":"…","value":"…","preview":"…"}]}` | `kind` is `text`, `color`, `image` or `diagram`; `preview` holds the description, colors, image path or SVG. A new `message` closes it. |
+| `turn_end` | `{"type":"turn_end","id":"m1","text":"…"}` | Always sent, even after an error or `cancel`. `text` is the complete reply and is authoritative over the deltas. |
+| `error` | `{"type":"error","message":"…","fatal":false}` | Problem; only an unsupported protocol is fatal. |
+| `notice` | `{"type":"notice","text":"…"}` | Extra information (provider fallback, cancellation, settings applied). Clients should ignore types they do not know. |
+
+Without `--fs` or `--no-fs`, file access is requested before `ready` with a
+`confirm_request` whose id is `fs` (`risk: high`). The same safety rules as the
+window apply: execution mode, once-per-session approvals, dangerous commands
+confirmed every time, protected files. With file access, the environment
+inventory at startup may itself send `confirm_request`s (package-manager
+queries such as `flatpak list`).
+
 ## Need help?
 
 The **?** button explains how the chat works. To check provider connections:

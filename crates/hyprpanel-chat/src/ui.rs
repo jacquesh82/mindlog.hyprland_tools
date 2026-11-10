@@ -24,6 +24,8 @@ static ROWS: AtomicUsize = AtomicUsize::new(0);
 pub enum Front {
     Window(Weak<ChatWindow>),
     Terminal(Arc<Terminal>),
+    /// Interface tierce : protocole JSON Lines (`hyprpanel-chat serve`).
+    Server(Arc<crate::serve::Server>),
 }
 
 impl From<&Weak<ChatWindow>> for Front {
@@ -59,6 +61,7 @@ pub fn append(front: impl Into<Front>, kind: &str, text: impl Into<String>) -> u
     match front.into() {
         Front::Window(weak) => window_append(&weak, kind, text.into()),
         Front::Terminal(terminal) => terminal.append(kind, &text.into()),
+        Front::Server(server) => server.append(kind, &text.into()),
     }
 }
 
@@ -91,6 +94,7 @@ pub fn update_last(front: impl Into<Front>, kind: &str, text: &str) {
             window_set_row(&weak, idx, kind, text);
         }
         Front::Terminal(terminal) => terminal.update_last(kind, text),
+        Front::Server(server) => server.update_last(kind, text),
     }
 }
 
@@ -98,6 +102,7 @@ pub fn set_row(front: impl Into<Front>, idx: usize, kind: &str, text: &str) {
     match front.into() {
         Front::Window(weak) => window_set_row(&weak, idx, kind, text),
         Front::Terminal(terminal) => terminal.set_row(idx, kind, text),
+        Front::Server(server) => server.set_row(idx, kind, text),
     }
 }
 
@@ -125,6 +130,7 @@ pub fn remove_last(front: impl Into<Front>) {
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.remove_last(),
+        Front::Server(server) => return server.remove_last(),
     };
     let weak = &weak;
     let idx = ROWS.fetch_sub(1, Ordering::SeqCst).saturating_sub(1);
@@ -140,6 +146,7 @@ pub fn clear(front: impl Into<Front>) {
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.clear(),
+        Front::Server(server) => return server.clear(),
     };
     let weak = &weak;
     ROWS.store(0, Ordering::SeqCst);
@@ -153,6 +160,7 @@ pub fn offer_choices(front: impl Into<Front>, request: crate::choices::ChoiceReq
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.offer_choices(request),
+        Front::Server(server) => return server.offer_choices(request),
     };
     let weak = &weak;
     ROWS.fetch_add(1, Ordering::SeqCst);
@@ -168,6 +176,8 @@ pub fn set_status(front: impl Into<Front>, status: impl Into<String>) {
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.set_status(&status),
+        // La barre d'état n'a pas d'équivalent dans le protocole.
+        Front::Server(_) => return,
     };
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -198,6 +208,7 @@ pub fn set_progress(front: impl Into<Front>, label: String, progress: Option<f32
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.set_status(&label),
+        Front::Server(server) => return server.progress(&label, progress),
     };
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -209,8 +220,10 @@ pub fn set_progress(front: impl Into<Front>, label: String, progress: Option<f32
 }
 
 pub fn set_activity(front: impl Into<Front>, activity: &str) {
-    let Front::Window(weak) = front.into() else {
-        return;
+    let weak = match front.into() {
+        Front::Window(weak) => weak,
+        Front::Server(server) => return server.activity(activity),
+        Front::Terminal(_) => return,
     };
     let activity = activity.to_string();
     let _ = slint::invoke_from_event_loop(move || {
@@ -277,6 +290,7 @@ pub fn history_set(front: impl Into<Front>, records: &[crate::agent::TurnRecord]
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.history_set(records),
+        Front::Server(_) => return,
     };
     let rows: Vec<crate::HistoryRow> = records
         .iter()
@@ -307,6 +321,7 @@ pub fn set_tr(front: impl Into<Front>, translations: &crate::i18n::Tr) {
     let weak = match front.into() {
         Front::Window(weak) => weak,
         Front::Terminal(terminal) => return terminal.set_tr(translations.clone()),
+        Front::Server(server) => return server.set_tr(translations.clone()),
     };
     let texts = translations.to_slint();
     let _ = slint::invoke_from_event_loop(move || {
@@ -321,8 +336,17 @@ pub type ProviderLine = (String, bool, String);
 
 /// Affiche l'état des fournisseurs. Fenêtre : panneau au-dessus de la saisie
 /// et blocage d'Envoyer tant que `ready` est faux. Terminal : bloc imprimé.
-pub fn set_providers(front: &Front, ready: bool, lines: Vec<ProviderLine>, tr: &Tr) {
+pub fn set_providers(
+    front: &Front,
+    ready: bool,
+    available: &[crate::chat_config::Provider],
+    lines: Vec<ProviderLine>,
+    tr: &Tr,
+) {
     match front {
+        Front::Server(server) => {
+            server.providers(ready, available, &providers_text(&lines, tr));
+        }
         Front::Window(weak) => {
             let weak = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
@@ -373,6 +397,9 @@ pub fn set_providers_checking(front: &Front, checking: bool) {
 /// Repli de session : la fenêtre met à jour son sélecteur et sa copie de la
 /// configuration (sans l'enregistrer).
 pub fn provider_fallback(front: &Front, provider: crate::chat_config::Provider) {
+    if let Front::Server(server) = front {
+        server.set_provider(provider);
+    }
     if let Front::Window(weak) = front {
         let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
@@ -380,5 +407,33 @@ pub fn provider_fallback(front: &Front, provider: crate::chat_config::Provider) 
                 app.invoke_provider_fallback(provider.index());
             }
         });
+    }
+}
+
+/// Début d'un tour (message ou choix) : `turn_start` côté protocole.
+pub fn turn_start(front: &Front) {
+    if let Front::Server(server) = front {
+        server.turn_start();
+    }
+}
+
+/// Fin d'un tour, quelle qu'en soit l'issue : `turn_end` côté protocole.
+pub fn turn_end(front: &Front) {
+    if let Front::Server(server) = front {
+        server.turn_end();
+    }
+}
+
+/// Un outil démarre (nom et arguments résumés).
+pub fn tool_started(front: &Front, name: &str, summary: &str) {
+    if let Front::Server(server) = front {
+        server.tool_started(name, summary);
+    }
+}
+
+/// Résultat brut de l'outil en cours (JSON ou texte).
+pub fn tool_finished(front: &Front, output: &str) {
+    if let Front::Server(server) = front {
+        server.tool_finished(output);
     }
 }

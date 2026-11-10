@@ -27,6 +27,33 @@ use crate::i18n::{Lang, Tr, tr};
 use crate::mcp::McpSession;
 use crate::ui;
 
+/// Annulation du tour en cours (`serve` : message `cancel`). Un compteur de
+/// génération évite qu'une annulation reçue entre deux tours vise le suivant.
+#[derive(Clone)]
+pub struct Cancel(Arc<tokio::sync::watch::Sender<u64>>);
+
+impl Default for Cancel {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(0).0))
+    }
+}
+
+impl Cancel {
+    /// Annule le tour en cours, s'il y en a un.
+    pub fn cancel(&self) {
+        self.0.send_modify(|generation| *generation += 1);
+    }
+
+    /// Se résout à la prochaine annulation demandée après cet appel.
+    fn watch(&self) -> impl std::future::Future<Output = ()> + use<> {
+        let mut receiver = self.0.subscribe();
+        receiver.borrow_and_update();
+        async move {
+            let _ = receiver.changed().await;
+        }
+    }
+}
+
 /// Événements envoyés par l'UI vers la boucle agent.
 pub enum UserEvent {
     Input {
@@ -229,6 +256,7 @@ pub async fn run(
     front: ui::Front,
     filesystem: Arc<crate::filesystem::FilesystemAccess>,
     approvals: crate::commands::Approvals,
+    cancel: Cancel,
 ) {
     let mut cfg = cfg;
     let mut translations = tr(cfg.lang());
@@ -359,6 +387,7 @@ pub async fn run(
                 files,
                 pasted_images: _pasted_images,
             } => {
+                ui::turn_start(&front);
                 // Aucun fournisseur : revérifier (connexion faite entre-temps ?),
                 // sinon ne rien envoyer.
                 if !providers_ready {
@@ -366,6 +395,7 @@ pub async fn run(
                         refresh_providers(&mut cfg, &front, &translations, false).await;
                     if !providers_ready {
                         ui::append(&front, "error", &translations.provider_blocked);
+                        ui::turn_end(&front);
                         continue;
                     }
                     llm = build_llm(&cfg, &functions);
@@ -412,24 +442,39 @@ pub async fn run(
                 });
                 ui::history_set(&front, &ledger.records);
                 ui::set_busy(&front, true);
-                if let Err(e) = run_turn(
-                    &cfg,
-                    &functions,
-                    &llm,
-                    mcp.as_ref(),
-                    &mut convo,
-                    &text,
-                    &files,
-                    &translations,
-                    &front,
-                    &filesystem,
-                    &approvals,
-                )
-                .await
-                {
-                    ui::append(&front, "error", format!("{e:#}"));
+                let before = convo.len();
+                let cancelled = cancel.watch();
+                tokio::select! {
+                    result = run_turn(
+                        &cfg,
+                        &functions,
+                        &llm,
+                        mcp.as_ref(),
+                        &mut convo,
+                        &text,
+                        &files,
+                        &translations,
+                        &front,
+                        &filesystem,
+                        &approvals,
+                    ) => {
+                        if let Err(e) = result {
+                            ui::append(&front, "error", format!("{e:#}"));
+                        }
+                    }
+                    _ = cancelled => {
+                        // Le futur abandonné tue les processus enfants
+                        // (kill_on_drop) ; la conversation revient à l'état
+                        // d'avant le tour pour rester cohérente (pas
+                        // d'appel d'outil sans résultat).
+                        approvals.abort_pending();
+                        convo.truncate(before);
+                        ui::set_activity(&front, "idle");
+                        ui::append(&front, "status", &translations.turn_cancelled);
+                    }
                 }
                 ui::set_busy(&front, false);
+                ui::turn_end(&front);
                 ui::set_status(
                     &front,
                     if !filesystem.approved() {
@@ -761,9 +806,14 @@ async fn refresh_providers(
     let statuses = crate::providers::availability(cfg).await;
     ui::set_providers_checking(front, false);
     let lines = provider_lines(&statuses, translations);
+    let available: Vec<_> = statuses
+        .iter()
+        .filter(|status| status.problem.is_none())
+        .map(|status| status.provider)
+        .collect();
     match crate::providers::choose(cfg.provider, &statuses, true) {
         Choice::Ready => {
-            ui::set_providers(front, true, lines, translations);
+            ui::set_providers(front, true, &available, lines, translations);
             ui::set_status(front, "");
             true
         }
@@ -771,7 +821,7 @@ async fn refresh_providers(
             let from = cfg.provider;
             *cfg = cfg.clone().with_session_provider(provider);
             ui::provider_fallback(front, provider);
-            ui::set_providers(front, true, lines, translations);
+            ui::set_providers(front, true, &available, lines, translations);
             let notice = translations
                 .provider_fallback
                 .replace("{from}", from.label())
@@ -782,7 +832,7 @@ async fn refresh_providers(
         }
         Choice::Unavailable => {
             if report {
-                ui::set_providers(front, false, lines, translations);
+                ui::set_providers(front, false, &available, lines, translations);
             }
             ui::set_status(front, &translations.providers_title);
             false
@@ -805,6 +855,7 @@ fn runtime_system(
             interface: match front {
                 ui::Front::Window(_) => crate::identity::Interface::Window,
                 ui::Front::Terminal(_) => crate::identity::Interface::Terminal,
+                ui::Front::Server(_) => crate::identity::Interface::Server,
             },
             filesystem_approved: filesystem.approved(),
             root: filesystem.root(),
@@ -1058,6 +1109,7 @@ async fn run_turn(
                 }
                 details.push_str(&format!("→ {}({})", tc.name, compact_args(&tc.arguments)));
                 ui::set_row(front, row, "tool", &details);
+                ui::tool_started(front, &tc.name, &compact_args(&tc.arguments));
                 let out = if tc.name == crate::choices::PALETTE_TOOL {
                     crate::choices::palette_catalog().to_string()
                 } else if tc.name == crate::contrast::TOOL {
@@ -1138,6 +1190,7 @@ async fn run_turn(
                 details.push('\n');
                 details.push_str(&out);
                 ui::set_row(front, row, "tool", &details);
+                ui::tool_finished(front, &out);
                 out
             };
             if serde_json::from_str::<Value>(&out)

@@ -72,7 +72,7 @@ impl Approvals {
                     "{reason}\n\n{}",
                     translations.command_once.replace("{}", &label)
                 );
-                let approved = self.request(front, details, reason).await;
+                let approved = self.request_with_risk(front, details, reason, false).await;
                 if approved {
                     self.grant(&key);
                 }
@@ -80,7 +80,7 @@ impl Approvals {
             }
             Confirmation::Always => {
                 let reason = format!("{reason}\n\n{}", translations.command_always);
-                self.request(front, details, reason).await
+                self.request_with_risk(front, details, reason, true).await
             }
         }
     }
@@ -103,12 +103,40 @@ impl Approvals {
         }
     }
 
-    pub async fn request(&self, front: &Front, details: String, reason: String) -> bool {
+    /// Annulation d'un tour : la demande en attente est refusée et retirée.
+    pub fn abort_pending(&self) {
+        let pending = self
+            .pending
+            .lock()
+            .expect("confirmation empoisonnée")
+            .take();
+        if let Some(pending) = pending {
+            let _ = pending.answer.send(false);
+        }
+    }
+
+    /// `high` : commande dangereuse (confirmée à chaque fois).
+    pub async fn request_with_risk(
+        &self,
+        front: &Front,
+        details: String,
+        reason: String,
+        high: bool,
+    ) -> bool {
         let Ok((id, receiver)) = self.begin() else {
             return false;
         };
         let weak = match front {
             Front::Window(weak) => weak.clone(),
+            // Protocole serve : la réponse n'arrive que par un message
+            // `confirm` ; sans réponse, la demande reste en attente.
+            Front::Server(server) => {
+                if !server.confirm_request(id, &details, &reason, high) {
+                    // Entrée fermée : personne ne pourra répondre.
+                    self.answer(id, false);
+                }
+                return receiver.await.unwrap_or(false);
+            }
             Front::Terminal(terminal) => {
                 // Lecture bloquante de stdin hors du runtime : la boucle de
                 // saisie attend la fin du tour et ne lit pas en parallèle.

@@ -699,9 +699,14 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
                     .enable_all()
                     .build()
                 {
-                    Ok(runtime) => {
-                        runtime.block_on(agent::run(cfg, rx, front, filesystem, approvals))
-                    }
+                    Ok(runtime) => runtime.block_on(agent::run(
+                        cfg,
+                        rx,
+                        front,
+                        filesystem,
+                        approvals,
+                        agent::Cancel::default(),
+                    )),
                     Err(e) => eprintln!("runtime tokio : {e}"),
                 }
             })

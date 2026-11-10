@@ -13,6 +13,8 @@ use crate::operations::Mode;
 pub enum Interface {
     Window,
     Terminal,
+    /// Interface tierce (hyprdesk) via `hyprpanel-chat serve`.
+    Server,
 }
 
 /// Faits observés sur la machine, sans commande ni accord nécessaire.
@@ -95,6 +97,12 @@ pub fn block(lang: Lang, cfg: &ChatConfig, state: &State<'_>, facts: &Facts) -> 
         (Interface::Window, false) => "native chat window (Slint, Wayland, app_id lyra)",
         (Interface::Terminal, true) => "terminal (hyprpanel-chat cli)",
         (Interface::Terminal, false) => "terminal (hyprpanel-chat cli)",
+        (Interface::Server, true) => {
+            "panneau d'une application tierce (hyprdesk) via hyprpanel-chat serve ; réponses en Markdown"
+        }
+        (Interface::Server, false) => {
+            "panel of a third-party application (hyprdesk) via hyprpanel-chat serve; replies in Markdown"
+        }
     };
     let mode = match (cfg.operation_mode, fr) {
         (Mode::ConfirmOnce, true) => {
