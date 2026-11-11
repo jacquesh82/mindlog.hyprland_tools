@@ -6,14 +6,13 @@
 
 use crate::chat_config::{ChatConfig, Provider};
 use anyhow::{Context, bail, ensure};
-use base64::Engine as _;
 use langchain_rust::{
-    language_models::GenerateResult,
+    language_models::{GenerateResult, TokenUsage},
     schemas::{FunctionDefinition, Message, MessageType, ToolCall},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{path::Path, process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -396,6 +395,106 @@ pub async fn diagnose(cfg: &ChatConfig, live: bool, policy: bool) -> anyhow::Res
     Ok(())
 }
 
+/// Un appel de modèle pour les diagnostics, avec les points de cache de l'agent.
+async fn diagnostic_call(
+    cfg: &ChatConfig,
+    functions: &[FunctionDefinition],
+    convo: &[Message],
+) -> anyhow::Result<GenerateResult> {
+    use langchain_rust::{
+        language_models::{llm::LLM, options::CallOptions},
+        llm::claude::Claude,
+    };
+    if cfg.provider != Provider::Zcode {
+        return generate(cfg, functions, convo, &mut |_| {}).await;
+    }
+    let model = Claude::new()
+        .with_model(cfg.model.clone())
+        .with_base_url(cfg.base_url.clone())
+        .with_api_key(cfg.api_key.clone())
+        .with_options(
+            CallOptions::new()
+                .with_functions(functions.to_vec())
+                .with_max_tokens(1024),
+        );
+    let request = crate::agent::with_cache_breakpoints(convo);
+    Ok(tokio::time::timeout(CLI_TIMEOUT, model.generate(&request))
+        .await
+        .context("délai de réponse dépassé")??)
+}
+
+/// Deux appels réels qui se suivent, comme deux tours d'une conversation :
+/// le second doit relire depuis le cache du fournisseur le préfixe commun
+/// (outils, système, historique). Aucune action n'est exécutée.
+pub async fn check_cache(cfg: &ChatConfig) -> anyhow::Result<()> {
+    let mut functions = crate::web::definitions().to_vec();
+    functions.push(crate::commands::definition());
+    functions.push(crate::contrast::definition());
+    functions.extend(crate::choices::tool_definitions().iter().cloned());
+    let system = crate::agent::build_system(cfg.lang(), None, "");
+    let mut failures = 0;
+    for provider in [Provider::Zcode, Provider::ClaudeCode, Provider::Codex] {
+        let mut active = cfg.clone();
+        active.provider = provider;
+        let outcome = async {
+            if provider == Provider::Zcode {
+                ensure!(zcode_problem(&active).is_none(), "Coding Plan Zcode non configuré");
+            } else {
+                check_login(provider).await?;
+            }
+            let mut convo = vec![
+                Message::new_system_message(&system),
+                Message::new_human_message("Cache diagnostic: reply with the single word ONE. Do not call any tool."),
+            ];
+            let mut reply = diagnostic_call(&active, &functions, &convo).await?;
+            // Le cache Zcode et OpenAI est « au mieux » : un appel de suivi
+            // peut le manquer ; un second départage un défaut réel.
+            for (attempt, word) in ["TWO", "THREE"].into_iter().enumerate() {
+                convo.push(Message::new_ai_message_with_tool_calls(
+                    &reply.generation,
+                    &reply.tool_calls,
+                ));
+                for call in &reply.tool_calls {
+                    convo.push(Message::new_tool_message(
+                        json!({"status":"skipped","reason":"cache diagnostic"}).to_string(),
+                        call.id.clone(),
+                    ));
+                }
+                convo.push(Message::new_human_message(format!(
+                    "Cache diagnostic: reply with the single word {word}. Do not call any tool."
+                )));
+                reply = diagnostic_call(&active, &functions, &convo).await?;
+                let usage = reply
+                    .tokens
+                    .clone()
+                    .context("le fournisseur ne communique pas l'usage des jetons")?;
+                println!(
+                    "{} : appel de suivi {}, {} jetons d'entrée dont {} relus depuis le cache ({} écrits)",
+                    provider.label(),
+                    attempt + 1,
+                    usage.prompt_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_creation_tokens
+                );
+                if usage.cache_read_tokens > 0 {
+                    return Ok(());
+                }
+            }
+            bail!("aucun jeton relu depuis le cache sur deux appels de suivi")
+        }
+        .await;
+        if let Err(error) = outcome {
+            failures += 1;
+            eprintln!("{} : {error:#}", provider.label());
+        }
+    }
+    ensure!(
+        failures == 0,
+        "{failures} fournisseur(s) sans cache vérifié"
+    );
+    Ok(())
+}
+
 /// Les clients ne reçoivent aucun outil natif : ce test s'arrête aux demandes
 /// structurées. Aucune recherche ni commande issue du modèle n'est exécutée.
 async fn check_policy(cfg: &ChatConfig) -> anyhow::Result<()> {
@@ -488,72 +587,136 @@ async fn check_policy(cfg: &ChatConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-// Images natives pour les deux CLI ; ne jamais enfouir le base64 dans le texte.
+/// Image native d'un message : jamais enfouie en base64 dans le texte.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Image {
+    /// Numéro global dans l'historique (« [Image jointe N] »), stable d'un appel à l'autre.
+    index: usize,
+    media: String,
+    data: String,
+}
+
+impl Image {
+    fn file_name(&self) -> String {
+        let ext = match self.media.as_str() {
+            "image/png" => "png",
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            _ => "webp",
+        };
+        format!("image-{}.{ext}", self.index)
+    }
+
+    fn block(&self) -> Value {
+        json!({"type":"image","source":{"type":"base64","media_type":self.media,"data":self.data}})
+    }
+}
+
+/// Un message de l'historique, sérialisé de façon déterministe. Chaque message
+/// devient son propre bloc : l'historique déjà envoyé reste un préfixe exact,
+/// que Claude Code relit depuis son cache et que Codex n'a pas à recevoir.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Entry {
+    text: String,
+    images: Vec<Image>,
+}
+
+impl Entry {
+    fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+struct Prepared {
+    system: String,
+    entries: Vec<Entry>,
+}
+
+impl Prepared {
+    /// Contenu du message utilisateur Claude Code : un bloc texte par message,
+    /// suivi de ses images.
+    fn claude_content(&self) -> Vec<Value> {
+        self.entries
+            .iter()
+            .flat_map(|entry| {
+                std::iter::once(json!({"type":"text","text":entry.text}))
+                    .chain(entry.images.iter().map(Image::block))
+            })
+            .collect()
+    }
+}
+
+fn decode_image(raw: String) -> anyhow::Result<(String, String)> {
+    let (media, data) = if let Some(rest) = raw.strip_prefix("data:") {
+        let (media, data) = rest
+            .split_once(";base64,")
+            .context("image inline base64 attendue")?;
+        (media.to_string(), data.to_string())
+    } else {
+        let media = if raw.starts_with("iVBOR") {
+            "image/png"
+        } else if raw.starts_with("/9j/") {
+            "image/jpeg"
+        } else if raw.starts_with("R0lGOD") {
+            "image/gif"
+        } else if raw.starts_with("UklGR") {
+            "image/webp"
+        } else {
+            bail!("image inline non reconnue")
+        };
+        (media.into(), raw)
+    };
+    ensure!(
+        matches!(
+            media.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ),
+        "format d'image non pris en charge"
+    );
+    Ok((media, data))
+}
+
 fn prepare_prompt(
     messages: &[Message],
     functions: &[FunctionDefinition],
-    dir: &Path,
-) -> anyhow::Result<(String, String, Vec<Value>, Vec<std::path::PathBuf>)> {
-    let mut history: Vec<_> = messages
-        .iter()
-        .filter(|m| !matches!(m.message_type, MessageType::SystemMessage))
-        .cloned()
-        .collect();
+) -> anyhow::Result<Prepared> {
     let mut system = messages
         .iter()
         .filter(|m| matches!(m.message_type, MessageType::SystemMessage))
         .map(|m| m.content.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    let mut images = Vec::new();
-    let mut paths = Vec::new();
-    for message in &mut history {
+    let mut entries = Vec::new();
+    let mut count = 0;
+    for message in messages
+        .iter()
+        .filter(|m| !matches!(m.message_type, MessageType::SystemMessage))
+    {
+        let mut message = message.clone();
+        // Les points de cache Anthropic ne concernent que le transport Zcode.
+        message.cache_control = None;
+        let mut images = Vec::new();
         for image in message.images.take().unwrap_or_default() {
-            let raw = image.image_url;
-            let (media, data) = if let Some(rest) = raw.strip_prefix("data:") {
-                let (media, data) = rest
-                    .split_once(";base64,")
-                    .context("image inline base64 attendue")?;
-                (media.to_string(), data.to_string())
-            } else {
-                let media = if raw.starts_with("iVBOR") {
-                    "image/png"
-                } else if raw.starts_with("/9j/") {
-                    "image/jpeg"
-                } else if raw.starts_with("R0lGOD") {
-                    "image/gif"
-                } else if raw.starts_with("UklGR") {
-                    "image/webp"
-                } else {
-                    bail!("image inline non reconnue")
-                };
-                (media.into(), raw)
-            };
-            let ext = match media.as_str() {
-                "image/png" => "png",
-                "image/jpeg" => "jpg",
-                "image/gif" => "gif",
-                "image/webp" => "webp",
-                _ => bail!("format d'image non pris en charge"),
-            };
-            let index = images.len() + 1;
+            let (media, data) = decode_image(image.image_url)?;
+            count += 1;
             message
                 .content
-                .push_str(&format!("\n[Image jointe {index}]"));
-            let path = dir.join(format!("image-{index}.{ext}"));
-            std::fs::write(
-                &path,
-                base64::engine::general_purpose::STANDARD
-                    .decode(&data)
-                    .context("image base64")?,
-            )?;
-            paths.push(path);
-            images.push(
-                json!({"type":"image","source":{"type":"base64","media_type":media,"data":data}}),
-            );
+                .push_str(&format!("\n[Image jointe {count}]"));
+            images.push(Image {
+                index: count,
+                media,
+                data,
+            });
         }
+        entries.push(Entry {
+            text: serde_json::to_string(&message)?,
+            images,
+        });
     }
-    system.push_str("\n\nRESPONSE PROTOCOL: Return exactly the requested JSON schema. Put the user-facing answer in text, in the requested language, using Markdown. To use a LYRA tool, return its name and JSON-encoded arguments in tool_calls. The host executes these calls and supplies their results in the next request. Never simulate a result or claim a change succeeded without its tool result. Use only the listed tools. If none is needed, tool_calls is empty. After lyra_offer_choices, wait for the user’s click. Do not use built-in tools or access files. Available LYRA tools:\n");
+    system.push_str("\n\nRESPONSE PROTOCOL: The conversation is supplied as JSON messages, one content block per message, oldest first. Return exactly the requested JSON schema. Put the user-facing answer in text, in the requested language, using Markdown. To use a LYRA tool, return its name and JSON-encoded arguments in tool_calls. The host executes these calls and supplies their results in the next request. Never simulate a result or claim a change succeeded without its tool result. Use only the listed tools. If none is needed, tool_calls is empty. After lyra_offer_choices, wait for the user’s click. Do not use built-in tools or access files. Available LYRA tools:\n");
     system.push_str(
         &json!(
             functions
@@ -565,8 +728,22 @@ fn prepare_prompt(
         )
         .to_string(),
     );
-    let prompt = json!({"conversation":history}).to_string();
-    Ok((system, prompt, images, paths))
+    Ok(Prepared { system, entries })
+}
+
+fn count(value: &Value) -> u32 {
+    value.as_u64().unwrap_or(0).try_into().unwrap_or(u32::MAX)
+}
+
+/// Usage d'un événement `result` de Claude Code (format Anthropic).
+fn claude_usage(usage: &Value) -> TokenUsage {
+    let read = count(&usage["cache_read_input_tokens"]);
+    let created = count(&usage["cache_creation_input_tokens"]);
+    TokenUsage::new(
+        count(&usage["input_tokens"]) + read + created,
+        count(&usage["output_tokens"]),
+    )
+    .with_cache_tokens(read, created)
 }
 
 /// Lance un seul appel de modèle. La boucle de décision reste dans agent.rs.
@@ -583,7 +760,8 @@ pub async fn generate(
         return codex::generate(cfg, functions, messages, on_text).await;
     }
     let dir = private_dir()?;
-    let (system, prompt, images, _paths) = prepare_prompt(messages, functions, dir.path())?;
+    let prepared = prepare_prompt(messages, functions)?;
+    let system = &prepared.system;
     let schema = reply_schema(functions).to_string();
     let mut cmd = command(cfg.provider);
     cmd.current_dir(dir.path());
@@ -596,7 +774,7 @@ pub async fn generate(
                 "--verbose",
                 "--include-partial-messages",
                 "--system-prompt",
-                &system,
+                system,
                 "--no-session-persistence",
                 "--setting-sources",
                 "",
@@ -618,8 +796,7 @@ pub async fn generate(
             if !cfg.claude_model.is_empty() {
                 cmd.args(["--model", &cfg.claude_model]);
             }
-            let mut content = vec![json!({"type":"text","text":prompt})];
-            content.extend(images);
+            let content = prepared.claude_content();
             json!({"type":"user","message":{"role":"user","content":content}}).to_string() + "\n"
         }
         Provider::Codex => unreachable!("Codex uses app-server streaming"),
@@ -644,6 +821,7 @@ pub async fn generate(
         let mut partial_json = String::new();
         let mut output_index = None;
         let mut progress = streaming::TextStream::new(on_text);
+        let mut usage = None;
         while let Some(line) = lines.next_line().await? {
             count += line.len();
             ensure!(count <= OUTPUT_LIMIT, "sortie du client trop volumineuse");
@@ -661,6 +839,7 @@ pub async fn generate(
             }
             if event["type"] == "result" {
                 failed = event["is_error"] == true;
+                usage = Some(claude_usage(&event["usage"]));
                 reply = event.get("structured_output").cloned();
                 if reply.is_none() && !failed {
                     reply = event["result"].as_str().and_then(|s| serde_json::from_str(s).ok());
@@ -669,7 +848,9 @@ pub async fn generate(
         }
         let status = child.wait().await?;
         ensure!(status.success() && !failed, "{} a interrompu la réponse (authentification, quota ou réseau) ; vérifiez le client officiel", cfg.provider.label());
-        decode_reply(reply.context("le client n'a pas renvoyé de réponse structurée")?, functions)
+        let mut result = decode_reply(reply.context("le client n'a pas renvoyé de réponse structurée")?, functions)?;
+        result.tokens = usage;
+        Ok(result)
     }).await;
     input_task.abort();
     result.with_context(|| format!("{} : délai de réponse dépassé", cfg.provider.label()))?
@@ -728,36 +909,44 @@ mod tests {
 
     #[test]
     fn system_context_is_sent_as_system_not_inside_user_history() {
-        let dir = private_dir().unwrap();
         let messages = vec![
             Message::new_system_message("SYSTEM-MARKER"),
             Message::new_human_message("hello"),
         ];
-        let (system, prompt, _, _) = prepare_prompt(&messages, &[], dir.path()).unwrap();
-        assert!(system.starts_with("SYSTEM-MARKER"));
-        assert!(!prompt.contains("SYSTEM-MARKER"));
-        assert!(prompt.contains("hello"));
+        let prepared = prepare_prompt(&messages, &[]).unwrap();
+        assert!(prepared.system.starts_with("SYSTEM-MARKER"));
+        assert_eq!(prepared.entries.len(), 1);
+        assert!(!prepared.entries[0].text.contains("SYSTEM-MARKER"));
+        assert!(prepared.entries[0].text.contains("hello"));
     }
+
     #[test]
-    fn retrieved_context_reaches_cli_system_without_overriding_mandatory_rules() {
-        let dir = private_dir().unwrap();
-        let recall = "LOCAL RETRIEVED CONTEXT: user_choice PALETTE-MARKER #7BDACD";
-        let shared = crate::agent::build_system(crate::i18n::Lang::En, Some(recall), "");
-        let messages = vec![
-            Message::new_system_message(&shared),
-            Message::new_human_message("Reuse the Brave palette"),
+    fn historique_envoye_reste_un_prefixe_exact_pour_le_cache() {
+        let system = crate::agent::build_system(crate::i18n::Lang::En, None, "");
+        let first = vec![
+            Message::new_system_message(&system),
+            Message::new_human_message("<turn_context>RECALL-1</turn_context>\n\nBonjour"),
         ];
-        let (system, prompt, _, _) = prepare_prompt(&messages, &[], dir.path()).unwrap();
-        assert!(system.contains(recall));
-        assert!(!prompt.contains("PALETTE-MARKER"));
+        let mut longer = first.clone();
+        longer.push(Message::new_ai_message("Salut"));
+        longer.push(Message::new_human_message(
+            "<turn_context>RECALL-2</turn_context>\n\nEt ensuite ?",
+        ));
+        // Un point de cache Zcode éventuel ne change pas ce qu'envoient les CLI.
+        longer[1].cache_control = Some(langchain_rust::schemas::CacheControl::Ephemeral);
+        let a = prepare_prompt(&first, &[]).unwrap();
+        let b = prepare_prompt(&longer, &[]).unwrap();
+        assert_eq!(a.system, b.system, "système identique d'un tour à l'autre");
         assert!(
-            system.find("COLOR TOOL PROTOCOL").unwrap() > system.find("PALETTE-MARKER").unwrap()
+            !b.system.contains("RECALL"),
+            "le rappel voyage avec la demande"
         );
-        assert_eq!(
-            messages[0].content, shared,
-            "Le même message SYSTEM est transmis au transport Zcode"
-        );
+        assert!(b.entries.starts_with(&a.entries));
+        assert!(b.claude_content().starts_with(&a.claude_content()));
+        assert_eq!(b.claude_content().len(), 3, "un bloc par message");
+        assert_eq!(a.entries[0].fingerprint(), b.entries[0].fingerprint());
     }
+
     #[test]
     fn cli_reply_requires_known_tool_and_object_arguments() {
         let tools = vec![FunctionDefinition::new(
@@ -800,24 +989,28 @@ mod tests {
     }
     #[test]
     fn attachments_use_native_image_blocks_and_private_files() {
-        let dir = private_dir().unwrap();
         let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6YQAAAAASUVORK5CYII=";
-        let messages =
-            vec![Message::new_human_message("Commente cette image").with_images(vec![data])];
-        let (_system, prompt, images, paths) = prepare_prompt(&messages, &[], dir.path()).unwrap();
+        let messages = vec![
+            Message::new_human_message("Commente cette image").with_images(vec![data]),
+            Message::new_ai_message("Vu"),
+            Message::new_human_message("Et celle-ci").with_images(vec![data]),
+        ];
+        let prepared = prepare_prompt(&messages, &[]).unwrap();
+        let entry = &prepared.entries[0];
         assert!(
-            !prompt.contains(data),
+            !entry.text.contains(data),
             "le base64 ne doit pas être envoyé comme du texte"
         );
-        assert!(prompt.contains("Image jointe 1"));
-        assert_eq!(images[0]["source"]["media_type"], "image/png");
-        assert_eq!(images[0]["source"]["data"], data);
-        assert_eq!(
-            std::fs::read(&paths[0]).unwrap(),
-            base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .unwrap()
-        );
+        assert!(entry.text.contains("Image jointe 1"));
+        assert_eq!(entry.images[0].media, "image/png");
+        assert_eq!(entry.images[0].data, data);
+        // Numérotation globale stable : la 2e image reste « 2 » à chaque appel.
+        assert!(prepared.entries[2].text.contains("Image jointe 2"));
+        assert_eq!(prepared.entries[2].images[0].file_name(), "image-2.png");
+        let content = prepared.claude_content();
+        assert_eq!(content[1]["type"], "image", "image juste après son message");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        let dir = private_dir().unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -826,5 +1019,17 @@ mod tests {
                 0o700
             );
         }
+    }
+
+    #[test]
+    fn usage_claude_code_compte_les_jetons_en_cache() {
+        let usage = claude_usage(
+            &json!({"input_tokens":2,"cache_read_input_tokens":48569,"cache_creation_input_tokens":367,"output_tokens":4}),
+        );
+        assert_eq!(usage.prompt_tokens, 2 + 48569 + 367);
+        assert_eq!(
+            (usage.cache_read_tokens, usage.cache_creation_tokens),
+            (48569, 367)
+        );
     }
 }

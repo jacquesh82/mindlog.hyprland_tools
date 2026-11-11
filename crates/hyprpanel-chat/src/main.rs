@@ -110,6 +110,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some("check-providers") => {
             let cfg = chat_config::ChatConfig::load().map_err(anyhow::Error::msg)?;
+            if args.iter().any(|a| a == "--cache") {
+                return tokio::runtime::Runtime::new()?.block_on(providers::check_cache(&cfg));
+            }
             return tokio::runtime::Runtime::new()?.block_on(providers::diagnose(
                 &cfg,
                 args.iter().any(|a| a == "--live"),

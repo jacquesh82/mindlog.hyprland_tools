@@ -299,7 +299,8 @@ reports. The former `limit_wayland_scope` setting is gone; older `chat.toml`
 files that still contain it load normally and the key is dropped on next save.
 
 Every SYSTEM prompt starts with the role, then an **identity and execution
-environment** block built on each turn (`src/identity.rs`): LYRA's version,
+environment** block built when the conversation starts and whenever settings,
+permissions, providers or the environment change (`src/identity.rs`): LYRA's version,
 provider and model, interface (window or terminal), tools, filesystem access,
 MCP daemon status, execution mode, and machine facts read without any command
 (`/etc/os-release`, `/proc/sys/kernel/osrelease`, architecture, `XDG_CURRENT_DESKTOP`,
@@ -331,6 +332,28 @@ All three providers stream text before the response is complete. Claude Code
 uses partial `stream-json` events; Codex uses `item/agentMessage/delta` notifications
 from app-server. Their structured replies are decoded incrementally so only the
 visible answer appears in the chat. Tool calls are validated before execution.
+
+### Prompt caching
+
+All three providers reuse a cached prompt prefix (tools, SYSTEM, earlier
+history) instead of reprocessing it each round. The precondition is common:
+the SYSTEM prompt stays byte-identical during a conversation. The per-request
+memory recall and the current UTC time therefore travel in a `<turn_context>`
+block at the start of the user message, marked as data that never overrides
+SYSTEM rules, and the SYSTEM prompt is only rebuilt on reset or when settings,
+permissions, providers or the environment change.
+
+| Provider | Mechanism |
+| --- | --- |
+| Zcode | Anthropic `cache_control` breakpoints set by LangChain Rust on the SYSTEM message and on the last message (sliding prefix); the stored conversation is never modified |
+| Claude Code | One content block per history message (deterministic JSON), so the history already sent stays an exact prefix that Claude Code’s own breakpoints find in its cache across processes |
+| Codex | OpenAI routes its cache by thread (`prompt_cache_key`): LYRA keeps the app-server process and its ephemeral thread for the conversation and sends only new messages. A different SYSTEM prompt or model, a truncated or edited history (cancel, reset), an error or 30 minutes idle starts a fresh process |
+
+`hyprpanel-chat check-providers --cache` makes two or three tiny real calls per
+provider, as consecutive turns, and fails if no follow-up call reads tokens from
+the cache. Zcode and OpenAI caching is best effort, so one miss is tolerated.
+Measured on 2026-11-11: Zcode 3,136/3,199 input tokens read from cache,
+Claude Code 5,923/6,233, Codex 9,344/9,578.
 
 LYRA executes MCP tools, creates backup records, and manages clickable choices
 for every provider. Using these features in LYRA does not require manual MCP
@@ -433,6 +456,7 @@ mode). The daemon/MCP failure message no longer exposes file paths.
 hyprpanel-chat check-providers
 hyprpanel-chat check-providers --live
 hyprpanel-chat check-providers --policy
+hyprpanel-chat check-providers --cache
 hyprpanel-chat check-web
 ```
 
@@ -443,6 +467,8 @@ validates two clickable choices. `--policy` makes real subscription requests to 
 a web-tool request, that an exact command is proposed through LYRA’s tool,
 and that inaccessible Waybar text receives a computed contrast correction.
 It never executes proposed web/command actions; contrast calculation is pure.
+`--cache` checks that consecutive calls read the prompt prefix from each
+provider’s cache (see Prompt caching).
 `check-web` reads the official wiki
 directly to diagnose HTTPS, DNS, and text extraction.
 These diagnostics do not modify Hyprland.
