@@ -7,7 +7,8 @@
 use std::path::Path;
 
 /// Fichiers appartenant à un outil externe : ne jamais éditer.
-pub const MANAGED_EXTERNALLY: &[(&str, &str)] = &[("monitors.lua", "external"), ("inputs.lua", "external")];
+pub const MANAGED_EXTERNALLY: &[(&str, &str)] =
+    &[("monitors.lua", "external"), ("inputs.lua", "external")];
 
 #[derive(Debug, serde::Serialize)]
 pub struct ConfigFileInfo {
@@ -85,7 +86,9 @@ pub fn find_in_configs(dir: &Path, needle: &str, max: usize) -> Vec<SettingMatch
     let mut files: Vec<_> = scan(dir).into_iter().map(|f| f.path).collect();
     files.sort();
     for file in files {
-        let Ok(content) = std::fs::read_to_string(&file) else { continue };
+        let Ok(content) = std::fs::read_to_string(&file) else {
+            continue;
+        };
         for (i, line) in content.lines().enumerate() {
             if line.to_lowercase().contains(&needle) {
                 out.push(SettingMatch {
@@ -144,7 +147,11 @@ mod tests {
     #[test]
     fn find_repere_file_ligne() {
         let d = tempdir("find");
-        fs::write(d.join("hyprland.lua"), "hl.config({\n  general = { gaps_in = 5 },\n})\n").unwrap();
+        fs::write(
+            d.join("hyprland.lua"),
+            "hl.config({\n  general = { gaps_in = 5 },\n})\n",
+        )
+        .unwrap();
         let m = find_in_configs(&d, "gaps_in", 10);
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].line, 2);

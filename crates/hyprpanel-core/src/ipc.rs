@@ -99,7 +99,9 @@ pub fn instance_signature() -> Result<String, IpcError> {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
         if best.as_ref().is_none_or(|(t, _)| modified > *t) {
             best = Some((modified, entry.file_name().to_string_lossy().into_owned()));
         }
@@ -160,7 +162,11 @@ pub fn eval(code: &str) -> Result<String, IpcError> {
 /// Construit la commande de setter d'option à chaud (équivalent de l'ancien
 /// `hyprctl keyword`, disparu en 0.57).
 pub fn build_set_option(path: &str, value: &str) -> String {
-    format!("/dispatch hl.dsp.global(\"conf {} {}\")", lua_escape(path), lua_escape(value))
+    format!(
+        "/dispatch hl.dsp.global(\"conf {} {}\")",
+        lua_escape(path),
+        lua_escape(value)
+    )
 }
 
 /// Applique une option à chaud. Répond `ok` même si l'option n'existe pas :
@@ -228,7 +234,10 @@ mod tests {
             build_set_option("a:b", "x\"y"),
             "/dispatch hl.dsp.global(\"conf a:b x\\\"y\")"
         );
-        assert_eq!(build_dispatch("hl.dsp.window.close()"), "/dispatch hl.dsp.window.close()");
+        assert_eq!(
+            build_dispatch("hl.dsp.window.close()"),
+            "/dispatch hl.dsp.window.close()"
+        );
         assert_eq!(
             build_dispatch("movecursortocorner 0"),
             "/dispatch hl.dsp.global(\"movecursortocorner 0\")"

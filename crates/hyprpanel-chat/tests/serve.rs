@@ -35,12 +35,20 @@ struct Session {
     child: Child,
     stdin: Option<ChildStdin>,
     lines: Receiver<Value>,
-    _sandbox: tempfile::TempDir,
+    sandbox: std::sync::Arc<tempfile::TempDir>,
 }
 
 impl Session {
     fn start(mode: &str, args: &[&str]) -> Self {
-        let sandbox = tempfile::tempdir().unwrap();
+        Self::start_in(
+            std::sync::Arc::new(tempfile::tempdir().unwrap()),
+            mode,
+            args,
+        )
+    }
+
+    /// Relance dans le même bac à sable (même HOME, mêmes décisions).
+    fn start_in(sandbox: std::sync::Arc<tempfile::TempDir>, mode: &str, args: &[&str]) -> Self {
         let bin = sandbox.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         write_script(&bin.join("claude"), FAKE_CLAUDE);
@@ -81,7 +89,7 @@ impl Session {
             child,
             stdin,
             lines,
-            _sandbox: sandbox,
+            sandbox,
         };
         session.send(json!({"type":"hello","client":"test","protocol":1}));
         session
@@ -116,6 +124,10 @@ impl Session {
     }
 
     fn close(mut self) -> i32 {
+        self.close_ref()
+    }
+
+    fn close_ref(&mut self) -> i32 {
         drop(self.stdin.take());
         for _ in 0..300 {
             if let Some(status) = self.child.try_wait().unwrap() {
@@ -280,4 +292,40 @@ fn acces_fichiers_demande_par_le_protocole() {
     let ready = session.until("ready", &mut seen);
     assert_eq!(ready["fs"], false);
     assert_eq!(session.close(), 0);
+}
+
+#[test]
+fn decisions_memorisees_entre_deux_lancements() {
+    // 1er lancement : accès fichiers demandé et accepté ; les éventuelles
+    // requêtes d'inventaire (flatpak, pipx, cargo…) sont refusées.
+    let mut first = Session::start("text", &[]);
+    let request = first.next();
+    assert_eq!(request["id"], "fs");
+    first.send(json!({"type":"confirm","request":"fs","accept":true}));
+    first.send(json!({"type":"message","id":"m1","text":"bonjour"}));
+    let mut seen = Vec::new();
+    assert_eq!(first.until("turn_end", &mut seen)["id"], "m1");
+    assert_eq!(seen[0]["fs"], true);
+    let sandbox = first.sandbox.clone();
+    assert_eq!(first.close_ref(), 0);
+    drop(first);
+
+    // 2e lancement : plus aucune demande, accès fichiers déjà accordé.
+    let mut second = Session::start_in(sandbox, "text", &[]);
+    second.send(json!({"type":"message","id":"m2","text":"encore"}));
+    let mut seen = Vec::new();
+    loop {
+        let message = second.next();
+        assert_ne!(
+            message["type"], "confirm_request",
+            "rien ne doit être redemandé : {message}"
+        );
+        seen.push(message.clone());
+        if message["type"] == "turn_end" {
+            break;
+        }
+    }
+    assert_eq!(seen[0]["type"], "ready");
+    assert_eq!(seen[0]["fs"], true);
+    assert_eq!(second.close_ref(), 0);
 }

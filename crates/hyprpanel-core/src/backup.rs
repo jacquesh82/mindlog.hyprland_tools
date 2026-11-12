@@ -23,7 +23,10 @@ pub enum BackupError {
 }
 
 fn config_files(dir: &Path) -> Vec<PathBuf> {
-    hypr_files::scan(dir).into_iter().map(|f| PathBuf::from(f.path)).collect()
+    hypr_files::scan(dir)
+        .into_iter()
+        .map(|f| PathBuf::from(f.path))
+        .collect()
 }
 
 fn copy_all(files: &[PathBuf], dest: &Path) -> Result<(), BackupError> {
@@ -54,7 +57,11 @@ pub fn create_backup(
         .filter(|l: &String| !l.is_empty())
         .map(|l| format!("-{l}"))
         .unwrap_or_default();
-    let name = format!("{}{}", timefmt::compact(std::time::SystemTime::now()), label);
+    let name = format!(
+        "{}{}",
+        timefmt::compact(std::time::SystemTime::now()),
+        label
+    );
     let dest = backups_dir.join(&name);
     copy_all(&config_files(config_dir), &dest)?;
     Ok(name)
@@ -127,7 +134,10 @@ pub fn restore_backup(
     }
     let src = backups_dir.join(name);
     if !src.is_dir() {
-        return Err(BackupError::UnknownBackup(name.to_string(), backups_dir.to_path_buf()));
+        return Err(BackupError::UnknownBackup(
+            name.to_string(),
+            backups_dir.to_path_buf(),
+        ));
     }
     if !config_dir.is_dir() {
         return Err(BackupError::MissingConfigDir(config_dir.to_path_buf()));
@@ -170,9 +180,16 @@ mod tests {
         fs::write(config.join("hyprland.lua"), "version 2 modifiée").unwrap();
         let n = restore_backup(&config, &backups, &b1).unwrap();
         assert_eq!(n, 2);
-        assert_eq!(fs::read_to_string(config.join("hyprland.lua")).unwrap(), "version 1");
+        assert_eq!(
+            fs::read_to_string(config.join("hyprland.lua")).unwrap(),
+            "version 1"
+        );
         // la sauvegarde de sécurité est là
-        assert!(list_backups(&backups).iter().any(|b| b.name.ends_with("-pre-restore")));
+        assert!(
+            list_backups(&backups)
+                .iter()
+                .any(|b| b.name.ends_with("-pre-restore"))
+        );
 
         fs::remove_dir_all(&config).unwrap();
         fs::remove_dir_all(&backups).unwrap();

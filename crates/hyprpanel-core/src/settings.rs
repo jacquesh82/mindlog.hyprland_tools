@@ -81,10 +81,13 @@ impl Settings {
         let path = config_path();
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("impossible de lire {} : {e}", path.display()))?;
-        let s: Settings = toml::from_str(&content)
-            .map_err(|e| format!("{} mal formé : {e}", path.display()))?;
+        let s: Settings =
+            toml::from_str(&content).map_err(|e| format!("{} mal formé : {e}", path.display()))?;
         if s.token.len() < 32 {
-            return Err(format!("jeton trop court dans {} — relancez `hyprpanel init`", path.display()));
+            return Err(format!(
+                "jeton trop court dans {} — relancez `hyprpanel init`",
+                path.display()
+            ));
         }
         Ok(s)
     }

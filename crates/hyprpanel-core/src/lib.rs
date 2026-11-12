@@ -13,6 +13,6 @@ pub mod settings;
 pub mod timefmt;
 
 pub use backup::{create_backup, list_backups, restore_backup};
-pub use clients::{detect_clients, registration_snippets, ClientRegistrations};
+pub use clients::{ClientRegistrations, detect_clients, registration_snippets};
 pub use events::{EventEntry, EventLog};
 pub use settings::Settings;

@@ -102,9 +102,11 @@ quota or network failures; those still appear as errors when a reply fails.
 
 ## Filesystem permission
 
-At launch, LYRA asks before giving the assistant read/write access to your
-**home folder (`~`)**. Choose **Allow access** or **Decline**. Access lasts for the
-session and can be revoked in Settings. File contents may be shared with the
+On first launch, LYRA asks before giving the assistant read/write access to your
+**home folder (`~`)**. Choose **Allow access** or **Decline**. Your choice is
+remembered for future launches (window, terminal and `serve`) and can be changed
+in **Settings → Access**. `--fs` / `--no-fs` override it for one launch without
+changing it. File contents may be shared with the
 selected provider when needed for your requests.
 
 Credentials stay out of reach of the file tools even after approval: `~/.ssh`,
@@ -167,8 +169,13 @@ package/desktop tools in a private local profile. Basic OS discovery requires no
 is refreshed each approved session and can be viewed/refreshed in Settings.
 Installed tools are discovered from package metadata, desktop launchers, and your
 approved configuration files. Versions and configuration paths include their source;
-missing versions stay unknown. Additional package-manager queries follow the
+missing versions stay unknown. Additional package-manager queries (`flatpak`, `pipx`, `cargo`…) follow the
 selected execution mode; copy-only mode displays them without running them.
+Each one is asked once: the answer, yes or no, is remembered for future launches.
+
+Remembered decisions live in `~/.config/hyprpanel/consents.toml` (mode 600, out of
+reach of LYRA's file tools). Delete the file, or one of its keys, to be asked
+again.
 
 The local mini-RAG recalls relevant excerpts from your requests and clicked choices,
 along with installed tools that match the current question. It searches locally,
@@ -281,12 +288,14 @@ hyprpanel-chat serve [--provider <zcode|claude_code|codex>] [--fs | --no-fs]
 | `error` | `{"type":"error","message":"…","fatal":false}` | Problem; only an unsupported protocol is fatal. |
 | `notice` | `{"type":"notice","text":"…"}` | Extra information (provider fallback, cancellation, settings applied). Clients should ignore types they do not know. |
 
-Without `--fs` or `--no-fs`, file access is requested before `ready` with a
-`confirm_request` whose id is `fs` (`risk: high`). The same safety rules as the
+Without `--fs` or `--no-fs`, and only when no decision is remembered yet, file
+access is requested before `ready` with a `confirm_request` whose id is `fs`
+(`risk: high`). The answer is remembered, so later launches go straight to
+`ready`. The same safety rules as the
 window apply: execution mode, once-per-session approvals, dangerous commands
 confirmed every time, protected files. With file access, the environment
 inventory at startup may itself send `confirm_request`s (package-manager
-queries such as `flatpak list`).
+queries such as `flatpak list`), each only once: answers are remembered.
 
 ## Need help?
 

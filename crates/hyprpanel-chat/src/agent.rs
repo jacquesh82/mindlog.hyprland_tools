@@ -293,7 +293,7 @@ pub async fn run(
     let mut providers_ready = refresh_providers(&mut cfg, &front, &translations, true).await;
     let mut environment_ready = filesystem.approved();
     if environment_ready {
-        refresh_environment(&front, &filesystem, &approvals, &translations).await;
+        refresh_environment(&front, &filesystem, &approvals, &translations, false).await;
     }
     let mut functions = available_functions(mcp.as_ref(), &filesystem);
 
@@ -322,7 +322,8 @@ pub async fn run(
             }
             UserEvent::FilesystemChanged => {
                 if filesystem.approved() && !environment_ready {
-                    refresh_environment(&front, &filesystem, &approvals, &translations).await;
+                    refresh_environment(&front, &filesystem, &approvals, &translations, false)
+                        .await;
                     environment_ready = true;
                 } else {
                     if !filesystem.approved() {
@@ -340,7 +341,8 @@ pub async fn run(
             }
             UserEvent::EnvironmentRefresh => {
                 if filesystem.approved() {
-                    refresh_environment(&front, &filesystem, &approvals, &translations).await;
+                    // Demande explicite : inventaire complet, cache ignoré.
+                    refresh_environment(&front, &filesystem, &approvals, &translations, true).await;
                     system = runtime_system(&cfg, mcp.as_ref(), &filesystem, &front);
                     convo[0] = Message::new_system_message(system.clone());
                 }
@@ -567,18 +569,43 @@ fn set_environment(front: &ui::Front, text: String) {
     });
 }
 
+/// Profil de l'environnement. L'inventaire n'est refait que si le référentiel
+/// installé a changé depuis le dernier (`inventory_cache`) ou si `force`
+/// (bouton « Actualiser l'environnement »).
 async fn refresh_environment(
     front: &ui::Front,
     filesystem: &Arc<crate::filesystem::FilesystemAccess>,
     approvals: &crate::commands::Approvals,
     translations: &Tr,
+    force: bool,
 ) {
     ui::set_busy(front, true);
     ui::set_status(front, &translations.environment_scanning);
     ui::set_activity(front, "tools");
     let result = async {
         filesystem.require_approval()?;
-        let mut profile = crate::environment::prepare(&crate::environment::path())?;
+        let path = crate::environment::path();
+        let mut profile = crate::environment::prepare(&path)?;
+        // Empreinte prise AVANT l'inventaire : un changement pendant le
+        // parcours sera vu au prochain démarrage.
+        let managers = profile.package_managers.clone();
+        let config_dir = filesystem.config_dir().to_path_buf();
+        let fingerprint = tokio::task::spawn_blocking(move || {
+            crate::inventory_cache::current(&managers, &config_dir)
+        })
+        .await?;
+        if !force {
+            if let Some(cached) = crate::environment::load_from(&path).filter(|cached| {
+                crate::inventory_cache::reusable(
+                    cached.inventory_fingerprint.as_deref(),
+                    &fingerprint,
+                )
+            }) {
+                profile.reuse_inventory(cached);
+                crate::environment::save(&path, &profile)?;
+                return Ok::<_, anyhow::Error>((profile, true));
+            }
+        }
         let fs = filesystem.clone();
         let managers = profile.package_managers.clone();
         let progress_front = front.clone();
@@ -621,14 +648,11 @@ async fn refresh_environment(
             )
         })
         .await??;
-        let mut declined = false;
+        // Réponses mémorisées des sessions précédentes, par gestionnaire.
+        let remembered = crate::consent::load().inventory;
         let plans = std::mem::take(&mut inventory.plans);
         let total = plans.len();
         for (index, query) in plans.into_iter().enumerate() {
-            if declined {
-                inventory.record(query.manager, "not_queried_after_decline", Vec::new(), None);
-                continue;
-            }
             filesystem.require_approval()?;
             ui::set_progress(
                 front,
@@ -642,26 +666,53 @@ async fn refresh_environment(
                 None,
             );
             let reason = translations.environment_query.replace("{}", query.manager);
-            let confirmation = approvals.confirm(
-                front,
-                filesystem
-                    .operation_mode()
-                    .command_confirmation(query.command),
-                query.command.into(),
-                reason.clone(),
-                translations,
-            );
+            let memory = remembered.get(query.manager).copied();
+            if memory == Some(false) {
+                inventory.record(query.manager, "declined", Vec::new(), None);
+                continue;
+            }
+            // Requête en lecture seule lancée par LYRA : la réponse vaut
+            // pour les sessions suivantes (consents.toml).
+            let ask =
+                filesystem.operation_mode().confirm_command(query.command) && memory != Some(true);
+            let confirmation = {
+                let details = query.command.to_string();
+                let reason = format!(
+                    "{reason}\n\n{}",
+                    translations
+                        .environment_query_remembered
+                        .replace("{}", query.manager)
+                );
+                async move {
+                    !ask || approvals
+                        .request_with_risk(front, details, reason, false)
+                        .await
+                }
+            };
             let request = crate::commands::Request {
                 command: query.command.into(),
                 reason,
             };
-            match crate::commands::run_inventory(request, filesystem, confirmation).await {
+            let outcome = crate::commands::run_inventory(request, filesystem, confirmation).await;
+            // Accord donné à la demande : mémorisé (le refus l'est plus bas).
+            if ask
+                && outcome.as_ref().is_ok_and(|output| {
+                    output["status"] != "declined" && output["status"] != "manual_only"
+                })
+            {
+                crate::consent::record_inventory(query.manager, true);
+            }
+            match outcome {
                 Ok(output) if output["status"] == "manual_only" => {
                     show_manual_command(front, &output, translations);
                     inventory.record(query.manager, "manual_only", Vec::new(), None);
                 }
+                // Chaque gestionnaire est demandé une fois, puis mémorisé : un
+                // refus n'empêche pas de proposer les suivants.
                 Ok(output) if output["status"] == "declined" => {
-                    declined = true;
+                    if ask {
+                        crate::consent::record_inventory(query.manager, false);
+                    }
                     inventory.record(query.manager, "declined", Vec::new(), None);
                 }
                 Ok(output) if output["success"] == true && output["truncated"] != true => {
@@ -708,17 +759,27 @@ async fn refresh_environment(
                 profile.package_managers.push(source.manager.clone());
             }
         }
-        crate::environment::save(&crate::environment::path(), &profile)?;
-        Ok::<_, anyhow::Error>(profile)
+        profile.inventory_fingerprint = Some(fingerprint);
+        crate::environment::save(&path, &profile)?;
+        Ok::<_, anyhow::Error>((profile, false))
     }
     .await;
     match result {
-        Ok(profile) => {
+        Ok((profile, cached)) => {
             set_environment(
                 front,
                 serde_json::to_string_pretty(&profile).unwrap_or_default(),
             );
-            ui::set_status(front, &translations.environment_refreshed);
+            if cached {
+                ui::set_status(
+                    front,
+                    translations
+                        .environment_cached
+                        .replace("{}", &profile.observed_at),
+                );
+            } else {
+                ui::set_status(front, &translations.environment_refreshed);
+            }
         }
         Err(error) => {
             ui::append(

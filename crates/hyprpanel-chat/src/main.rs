@@ -9,6 +9,7 @@ mod choices;
 mod cli;
 mod clipboard;
 mod commands;
+mod consent;
 mod context_d;
 mod contrast;
 mod environment;
@@ -16,6 +17,7 @@ mod filesystem;
 mod i18n;
 mod identity;
 mod inventory;
+mod inventory_cache;
 mod mcp;
 mod memory;
 mod operations;
@@ -171,7 +173,12 @@ fn main() -> anyhow::Result<()> {
     app.set_app_version(env!("CARGO_PKG_VERSION").into());
     app.set_tr(i18n::tr(cfg.lang()).to_slint());
     app.set_fs_root(filesystem.root().to_string_lossy().to_string().into());
-    app.set_fs_approved(false);
+    // Décision mémorisée : pas de nouvelle demande au lancement.
+    let remembered_fs = consent::load().filesystem;
+    if let Some(approved) = remembered_fs {
+        filesystem.set_approved(approved);
+    }
+    app.set_fs_approved(remembered_fs.unwrap_or(false));
     {
         let model: slint::ModelRc<MessageRow> =
             std::rc::Rc::new(slint::VecModel::<MessageRow>::from(Vec::new())).into();
@@ -254,6 +261,9 @@ fn main() -> anyhow::Result<()> {
         let weak = app.as_weak();
         app.on_filesystem_decision(move |approved| {
             fs.set_approved(approved);
+            // Dialogue ou bouton des réglages : le choix vaut pour les
+            // prochains lancements (fenêtre, cli, serve).
+            consent::record_filesystem(approved);
             if let Some(app) = weak.upgrade() {
                 app.invoke_finish_filesystem(approved);
                 app.set_status(if approved {
@@ -654,7 +664,9 @@ fn main() -> anyhow::Result<()> {
         })
         .context("thread agent")?;
 
-    app.invoke_request_filesystem();
+    if remembered_fs.is_none() {
+        app.invoke_request_filesystem();
+    }
     app.run().context("boucle d'événements Slint")?;
     Ok(())
 }

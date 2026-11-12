@@ -86,7 +86,8 @@ mod tests {
 
     #[test]
     fn detection_claude_code() {
-        let global = r#"{"mcpServers":{"hyprpanel":{"type":"http","url":"http://127.0.0.1:8765/mcp"}}}"#;
+        let global =
+            r#"{"mcpServers":{"hyprpanel":{"type":"http","url":"http://127.0.0.1:8765/mcp"}}}"#;
         assert!(claude_code_registered(global));
         let projet = r#"{"projects":{"/home/x/proj":{"mcpServers":{"hyprpanel":{"url":"x"}}}}}"#;
         assert!(claude_code_registered(projet));

@@ -16,3 +16,4 @@ CONTEXT.md
 .env
 .env.*
 !.env.example
+.dual-graph/

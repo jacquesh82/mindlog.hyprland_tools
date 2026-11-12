@@ -680,9 +680,14 @@ pub fn run(args: &[String]) -> anyhow::Result<i32> {
             )
         );
     }
-    let approved = match options.filesystem {
+    let remembered = crate::consent::load();
+    let approved = match crate::consent::startup_filesystem(options.filesystem, &remembered) {
         Some(approved) => approved,
-        None if stdin_is_terminal => terminal.ask_filesystem(filesystem.root()),
+        None if stdin_is_terminal => {
+            let approved = terminal.ask_filesystem(filesystem.root());
+            crate::consent::record_filesystem(approved);
+            approved
+        }
         None => false,
     };
     filesystem.set_approved(approved);

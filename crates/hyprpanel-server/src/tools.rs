@@ -11,9 +11,9 @@
 use hyprpanel_core::{backup, hypr_files, ipc, timefmt};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock, ErrorData};
-use rmcp::{tool, tool_handler, tool_router, ServerHandler};
+use rmcp::{ServerHandler, tool, tool_handler, tool_router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::AppState;
 
@@ -134,7 +134,11 @@ fn truncate(s: String, limit: usize) -> String {
     while !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    format!("{}\n…[tronqué à {cut} caractères sur {}]", &s[..cut], s.len())
+    format!(
+        "{}\n…[tronqué à {cut} caractères sur {}]",
+        &s[..cut],
+        s.len()
+    )
 }
 
 /// Note rappelée partout où elle compte : getoption lit l'état fichiers.
@@ -198,7 +202,10 @@ impl Panel {
     /// est tronquée à `max_chars` (6000 par défaut) ; utilisez
     /// `hypr_find_setting` ou `hypr_eval` pour cibler un raccourci précis.
     #[tool]
-    pub async fn hypr_binds(&self, args: Parameters<BindsArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn hypr_binds(
+        &self,
+        args: Parameters<BindsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let v = ipc::query_json("binds").map_err(ipc_err)?;
         let count = v.as_array().map(|a| a.len()).unwrap_or(0);
         let body = truncate(json_out(&v), args.0.max_chars.unwrap_or(6000));
@@ -209,10 +216,15 @@ impl Panel {
     /// `decoration:rounding`). Répond l'état chargé des fichiers — voir la
     /// note sur les overrides runtime.
     #[tool]
-    pub async fn hypr_get_option(&self, args: Parameters<OptionArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn hypr_get_option(
+        &self,
+        args: Parameters<OptionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let option = args.0.option.trim().to_string();
         if option.is_empty() || option.split_whitespace().count() > 1 {
-            return Err(bad_param("option : chemin d'option Hyprland attendu, ex. general:gaps_in".into()));
+            return Err(bad_param(
+                "option : chemin d'option Hyprland attendu, ex. general:gaps_in".into(),
+            ));
         }
         let v = ipc::query_json(&format!("getoption {option}")).map_err(ipc_err)?;
         text(format!("{}\n{RUNTIME_OVERRIDE_NOTE}", json_out(&v)))
@@ -230,7 +242,9 @@ impl Panel {
     ) -> Result<CallToolResult, ErrorData> {
         let option = args.0.option.trim().to_string();
         if option.is_empty() {
-            return Err(bad_param("option : chemin d'option Hyprland attendu, ex. general:gaps_in".into()));
+            return Err(bad_param(
+                "option : chemin d'option Hyprland attendu, ex. general:gaps_in".into(),
+            ));
         }
         let r = ipc::set_option_live(&option, args.0.value.trim()).map_err(ipc_err)?;
         text(format!(
@@ -243,10 +257,15 @@ impl Panel {
     /// `hl.dsp.reload_config()`), soit la forme legacy `"nom args"`
     /// (`movecursortocorner 0`, `exec kitty`) enveloppée automatiquement.
     #[tool]
-    pub async fn hypr_dispatch(&self, args: Parameters<DispatchArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn hypr_dispatch(
+        &self,
+        args: Parameters<DispatchArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let target = args.0.target.trim().to_string();
         if target.is_empty() {
-            return Err(bad_param("target : expression hl.dsp.…(args) ou « nom args » legacy".into()));
+            return Err(bad_param(
+                "target : expression hl.dsp.…(args) ou « nom args » legacy".into(),
+            ));
         }
         let r = ipc::dispatch(&target).map_err(ipc_err)?;
         if r.starts_with("error") {
@@ -283,7 +302,9 @@ impl Panel {
         } else {
             format!("ERREURS :\n{errors}")
         };
-        text(format!("reload : {r}\n{errors}\n\n(les overrides runtime ont été réinitialisés à l'état des fichiers)"))
+        text(format!(
+            "reload : {r}\n{errors}\n\n(les overrides runtime ont été réinitialisés à l'état des fichiers)"
+        ))
     }
 
     /// Erreurs de configuration courantes (parsing, options inconnues), une
@@ -291,15 +312,27 @@ impl Panel {
     #[tool]
     pub async fn hypr_config_errors(&self) -> Result<CallToolResult, ErrorData> {
         let errors = ipc::config_errors().map_err(ipc_err)?;
-        text(if errors.trim().is_empty() { "aucune erreur de configuration".into() } else { errors })
+        text(if errors.trim().is_empty() {
+            "aucune erreur de configuration".into()
+        } else {
+            errors
+        })
     }
 
     /// Affiche une notification à l'écran — retour visuel immédiat pour
     /// l'utilisateur pendant une série de changements.
     #[tool]
-    pub async fn hypr_notify(&self, args: Parameters<NotifyArgs>) -> Result<CallToolResult, ErrorData> {
-        let r = ipc::notify(args.0.icon.unwrap_or(1), args.0.timeout_ms.unwrap_or(3000), "0", &args.0.message)
-            .map_err(ipc_err)?;
+    pub async fn hypr_notify(
+        &self,
+        args: Parameters<NotifyArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let r = ipc::notify(
+            args.0.icon.unwrap_or(1),
+            args.0.timeout_ms.unwrap_or(3000),
+            "0",
+            &args.0.message,
+        )
+        .map_err(ipc_err)?;
         text(format!("notification envoyée : {r}"))
     }
 
@@ -335,15 +368,23 @@ impl Panel {
             return Err(bad_param("needle : texte recherché attendu".into()));
         }
         let max = args.0.max_results.unwrap_or(50).clamp(1, 200);
-        let matches = hypr_files::find_in_configs(&self.state.settings.hypr_config_dir, &needle, max);
+        let matches =
+            hypr_files::find_in_configs(&self.state.settings.hypr_config_dir, &needle, max);
         if matches.is_empty() {
-            return text(format!("aucune occurrence de « {needle} » dans {}", self.state.settings.hypr_config_dir.display()));
+            return text(format!(
+                "aucune occurrence de « {needle} » dans {}",
+                self.state.settings.hypr_config_dir.display()
+            ));
         }
         let mut out = String::new();
         for m in &matches {
             out.push_str(&format!("{}:{}: {}\n", m.file, m.line, m.text));
         }
-        out.push_str(&format!("\n({} occurrence(s), limite {})", matches.len(), max));
+        out.push_str(&format!(
+            "\n({} occurrence(s), limite {})",
+            matches.len(),
+            max
+        ));
         text(out)
     }
 
@@ -351,7 +392,10 @@ impl Panel {
     /// `label` optionnel (alphanumérique). À faire AVANT une série
     /// d'éditions persistantes.
     #[tool]
-    pub async fn hypr_backup(&self, args: Parameters<BackupArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn hypr_backup(
+        &self,
+        args: Parameters<BackupArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let name = backup::create_backup(
             &self.state.settings.hypr_config_dir,
             &self.state.settings.backups_dir,
@@ -366,7 +410,10 @@ impl Panel {
     pub async fn hypr_list_backups(&self) -> Result<CallToolResult, ErrorData> {
         let list = backup::list_backups(&self.state.settings.backups_dir);
         if list.is_empty() {
-            return text(format!("aucun backup dans {}", self.state.settings.backups_dir.display()));
+            return text(format!(
+                "aucun backup dans {}",
+                self.state.settings.backups_dir.display()
+            ));
         }
         text(json_out(&json!({ "backups": list })))
     }
@@ -374,22 +421,33 @@ impl Panel {
     /// Restaure une sauvegarde dans la config active (une sauvegarde
     /// « pre-restore » est créée au préalable). Appeler `hypr_reload` ensuite.
     #[tool]
-    pub async fn hypr_restore_backup(&self, args: Parameters<RestoreBackupArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn hypr_restore_backup(
+        &self,
+        args: Parameters<RestoreBackupArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let count = backup::restore_backup(
             &self.state.settings.hypr_config_dir,
             &self.state.settings.backups_dir,
             args.0.name.trim(),
         )
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
-        text(format!("{count} fichier(s) restaurés (une sauvegarde pre-restore a été créée). Appelez hypr_reload pour appliquer."))
+        text(format!(
+            "{count} fichier(s) restaurés (une sauvegarde pre-restore a été créée). Appelez hypr_reload pour appliquer."
+        ))
     }
 
     /// Derniers événements Hyprland (changements d'espace de travail,
     /// fenêtres, couches…) captés depuis le socket d'événements :
     /// utile pour constater l'effet d'une action.
     #[tool]
-    pub async fn hypr_recent_events(&self, args: Parameters<RecentEventsArgs>) -> Result<CallToolResult, ErrorData> {
-        let entries = self.state.events.recent(args.0.count.unwrap_or(20).clamp(1, 200));
+    pub async fn hypr_recent_events(
+        &self,
+        args: Parameters<RecentEventsArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let entries = self
+            .state
+            .events
+            .recent(args.0.count.unwrap_or(20).clamp(1, 200));
         if entries.is_empty() {
             return text("aucun événement en mémoire (buffer vide ou Hyprland silencieux)");
         }
@@ -405,37 +463,63 @@ impl Panel {
     /// viser un moniteur précis (sinon tous). Renvoie le chemin du PNG :
     /// lisez le fichier pour l'observer.
     #[tool]
-    pub async fn hypr_screenshot(&self, args: Parameters<ScreenshotArgs>) -> Result<CallToolResult, ErrorData> {
+    pub async fn hypr_screenshot(
+        &self,
+        args: Parameters<ScreenshotArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
         let dir = &self.state.settings.screenshots_dir;
-        std::fs::create_dir_all(dir)
-            .map_err(|e| ErrorData::internal_error(format!("impossible de créer {} : {e}", dir.display()), None))?;
-        let path = dir.join(format!("screenshot-{}.png", timefmt::compact(std::time::SystemTime::now())));
+        std::fs::create_dir_all(dir).map_err(|e| {
+            ErrorData::internal_error(format!("impossible de créer {} : {e}", dir.display()), None)
+        })?;
+        let path = dir.join(format!(
+            "screenshot-{}.png",
+            timefmt::compact(std::time::SystemTime::now())
+        ));
         let mut cmd = std::process::Command::new("grim");
         // Sous systemd user, WAYLAND_DISPLAY peut manquer : repli sur le nom
         // le plus courant (grim en a besoin, pas nous pour l'IPC).
         if std::env::var_os("WAYLAND_DISPLAY").is_none() {
             cmd.env("WAYLAND_DISPLAY", "wayland-1");
         }
-        if let Some(o) = args.0.output.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
+        if let Some(o) = args
+            .0
+            .output
+            .as_deref()
+            .map(str::trim)
+            .filter(|o| !o.is_empty())
+        {
             cmd.arg("-o").arg(o);
         }
         cmd.arg(&path);
         let status = cmd.status().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                ErrorData::internal_error("grim est absent du PATH — installez-le (pacman -S grim)", None)
+                ErrorData::internal_error(
+                    "grim est absent du PATH — installez-le (pacman -S grim)",
+                    None,
+                )
             } else {
                 ErrorData::internal_error(format!("grim : {e}"), None)
             }
         })?;
         if !status.success() {
-            return Err(ErrorData::internal_error(format!("grim a échoué (code {status})"), None));
+            return Err(ErrorData::internal_error(
+                format!("grim a échoué (code {status})"),
+                None,
+            ));
         }
-        text(format!("capture écrite : {}\nLisez ce fichier image pour observer l'état de l'interface.", path.display()))
+        text(format!(
+            "capture écrite : {}\nLisez ce fichier image pour observer l'état de l'interface.",
+            path.display()
+        ))
     }
 }
 
 /// Instructions transmises aux clients MCP (Claude Code, ZCode…) au handshake.
 /// (Littéral requis par le macro `tool_handler`.)
 // (version.workspace = 0.1.0 — le macro n'accepte que des littéraux)
-#[tool_handler(name = "hyprpanel", version = "0.1.0", instructions = "Panneau de configuration Hyprland (configuration Lua, API hl.*).\n\nWORKFLOW RECOMMANDÉ\n1. hypr_status puis hypr_config_files pour situer la configuration.\n2. Tester un réglage À CHAUD avec hypr_set_option_live (aperçu non persistant) et confirmer visuellement (hypr_screenshot, hypr_recent_events).\n3. Pour persister : éditer ~/.config/hypr/hyprland.lua avec tes outils fichiers natifs (hypr_find_setting localise la ligne), puis hypr_reload et vérifier hypr_config_errors.\n4. hypr_backup avant une série d'éditions ; hypr_restore_backup + hypr_reload pour annuler.\n\nRÈGLES\n- monitors.lua et inputs.lua sont générés par un outil externe : NE JAMAIS les éditer.\n- getoption/hl.get_config lisent l'état des fichiers : un réglage appliqué à chaud peut y afficher l'ancienne valeur alors qu'il est actif.\n- hypr_set_option_live répond ok même pour une option inconnue : toujours vérifier l'effet réel.\n- Prévenir l'utilisateur avec hypr_notify avant un changement visible important.")]
+#[tool_handler(
+    name = "hyprpanel",
+    version = "0.1.0",
+    instructions = "Panneau de configuration Hyprland (configuration Lua, API hl.*).\n\nWORKFLOW RECOMMANDÉ\n1. hypr_status puis hypr_config_files pour situer la configuration.\n2. Tester un réglage À CHAUD avec hypr_set_option_live (aperçu non persistant) et confirmer visuellement (hypr_screenshot, hypr_recent_events).\n3. Pour persister : éditer ~/.config/hypr/hyprland.lua avec tes outils fichiers natifs (hypr_find_setting localise la ligne), puis hypr_reload et vérifier hypr_config_errors.\n4. hypr_backup avant une série d'éditions ; hypr_restore_backup + hypr_reload pour annuler.\n\nRÈGLES\n- monitors.lua et inputs.lua sont générés par un outil externe : NE JAMAIS les éditer.\n- getoption/hl.get_config lisent l'état des fichiers : un réglage appliqué à chaud peut y afficher l'ancienne valeur alors qu'il est actif.\n- hypr_set_option_live répond ok même pour une option inconnue : toujours vérifier l'effet réel.\n- Prévenir l'utilisateur avec hypr_notify avant un changement visible important."
+)]
 impl ServerHandler for Panel {}

@@ -6,10 +6,10 @@
 use anyhow::Context;
 use rmcp::model::{CallToolRequestParams, ClientConfig, Tool};
 use rmcp::service::RunningService;
-use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{RoleClient, ServiceExt};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub struct McpSession {
     client: RunningService<RoleClient, ClientConfig>,
@@ -18,8 +18,9 @@ pub struct McpSession {
 
 impl McpSession {
     pub async fn connect(url: &str) -> anyhow::Result<Self> {
-        let transport =
-            StreamableHttpClientTransport::from_config(StreamableHttpClientTransportConfig::with_uri(url.to_string()));
+        let transport = StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(url.to_string()),
+        );
         let client = ClientConfig::default()
             .serve(transport)
             .await
@@ -34,7 +35,10 @@ impl McpSession {
 
     /// Instructions du serveur (workflow Hyprland) reçues au handshake.
     pub fn instructions(&self) -> Option<String> {
-        self.client.peer_info().as_ref().and_then(|p| p.instructions.clone())
+        self.client
+            .peer_info()
+            .as_ref()
+            .and_then(|p| p.instructions.clone())
     }
 
     pub fn server_name(&self) -> Option<String> {

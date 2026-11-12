@@ -35,8 +35,8 @@ pub const USAGE: &str = "\
                            Protocole JSON Lines sur stdin/stdout pour une
                            interface tierce (hyprdesk) : même agent et mêmes
                            règles, une conversation par processus. Sans --fs
-                           ni --no-fs, l'accès fichiers est demandé par un
-                           confirm_request « fs ».
+                           ni --no-fs ni décision mémorisée, l'accès fichiers
+                           est demandé par un confirm_request « fs ».
 ";
 
 // ---------------------------------------------------------------------------
@@ -781,7 +781,8 @@ pub fn serve(
     // 2. Accès aux fichiers : option, sinon confirmation dédiée.
     let filesystem = crate::build_filesystem(&cfg)?;
     let mut backlog = Vec::new();
-    let approved = match filesystem_option {
+    let remembered = crate::consent::load();
+    let approved = match crate::consent::startup_filesystem(filesystem_option, &remembered) {
         Some(approved) => approved,
         None => {
             server.emit_now(Outgoing::ConfirmRequest {
@@ -800,6 +801,8 @@ pub fn serve(
                 };
                 match parse_incoming(&line) {
                     Ok(Incoming::Confirm { request, accept }) if request == FS_REQUEST => {
+                        // Mémorisé : plus de demande aux lancements suivants.
+                        crate::consent::record_filesystem(accept);
                         break accept;
                     }
                     Ok(Incoming::Confirm { request, .. }) => server.emit_now(Outgoing::Error {

@@ -10,7 +10,7 @@ mod tools;
 
 use std::sync::Arc;
 
-use hyprpanel_core::{events, ipc, Settings};
+use hyprpanel_core::{Settings, events, ipc};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
@@ -54,11 +54,20 @@ fn cmd_init(force: bool) -> i32 {
                 println!("configuration créée : {}", path.display());
                 println!("jeton : {}", s.token);
                 println!("\nProchaine étape : `hyprpanel serve` puis enregistrez le serveur MCP");
-                println!("  Claude Code : claude mcp add --transport http hyprpanel http://127.0.0.1:{}/mcp --header \"Authorization: Bearer {}\"", s.port, s.token);
-                println!("  ZCode (~/.zcode/cli/config.json, mcp.servers) : {{ \"url\": \"http://127.0.0.1:{}/mcp?key={}\" }}", s.port, s.token);
+                println!(
+                    "  Claude Code : claude mcp add --transport http hyprpanel http://127.0.0.1:{}/mcp --header \"Authorization: Bearer {}\"",
+                    s.port, s.token
+                );
+                println!(
+                    "  ZCode (~/.zcode/cli/config.json, mcp.servers) : {{ \"url\": \"http://127.0.0.1:{}/mcp?key={}\" }}",
+                    s.port, s.token
+                );
             } else {
                 println!("configuration existante (inchangée) : {}", path.display());
-                println!("jeton : {}  (utilisez `hyprpanel init --force` pour le régénérer)", s.token);
+                println!(
+                    "jeton : {}  (utilisez `hyprpanel init --force` pour le régénérer)",
+                    s.token
+                );
             }
             0
         }
@@ -86,8 +95,14 @@ fn cmd_check() -> i32 {
     let mut failures = 0;
 
     // IPC Hyprland
-    match ipc::instance_signature().map_err(|e| e.to_string()).and_then(|_| ipc::query_json("version").map_err(|e| e.to_string())) {
-        Ok(v) => println!("✓ IPC Hyprland joignable (version {})", v["version"].as_str().unwrap_or("?")),
+    match ipc::instance_signature()
+        .map_err(|e| e.to_string())
+        .and_then(|_| ipc::query_json("version").map_err(|e| e.to_string()))
+    {
+        Ok(v) => println!(
+            "✓ IPC Hyprland joignable (version {})",
+            v["version"].as_str().unwrap_or("?")
+        ),
         Err(e) => {
             println!("✗ IPC Hyprland : {e}");
             failures += 1;
@@ -98,13 +113,20 @@ fn cmd_check() -> i32 {
         Ok(s) => {
             let files = hyprpanel_core::hypr_files::scan(&s.hypr_config_dir);
             match (s.hypr_config_dir.is_dir(), files.is_empty()) {
-                (true, false) => println!("✓ config Hyprland : {} ({} fichiers)", s.hypr_config_dir.display(), files.len()),
+                (true, false) => println!(
+                    "✓ config Hyprland : {} ({} fichiers)",
+                    s.hypr_config_dir.display(),
+                    files.len()
+                ),
                 (true, true) => {
                     println!("✗ config Hyprland vide : {}", s.hypr_config_dir.display());
                     failures += 1;
                 }
                 _ => {
-                    println!("✗ répertoire de config introuvable : {}", s.hypr_config_dir.display());
+                    println!(
+                        "✗ répertoire de config introuvable : {}",
+                        s.hypr_config_dir.display()
+                    );
                     failures += 1;
                 }
             }
@@ -123,19 +145,34 @@ fn cmd_check() -> i32 {
                 }
             }
             let grim_ok = which("grim");
-            let grim_note = if grim_ok { "présent" } else { "absent — hypr_screenshot sera indisponible" };
-            println!("{} grim (captures) : {grim_note}", if grim_ok { "✓" } else { "⚠" });
+            let grim_note = if grim_ok {
+                "présent"
+            } else {
+                "absent — hypr_screenshot sera indisponible"
+            };
+            println!(
+                "{} grim (captures) : {grim_note}",
+                if grim_ok { "✓" } else { "⚠" }
+            );
             // clients externes enregistrés auprès du panneau
             let regs = hyprpanel_core::detect_clients();
             println!(
                 "{} Claude Code : {}",
                 if regs.claude_code { "✓" } else { "✗" },
-                if regs.claude_code { "enregistré" } else { "non enregistré (commande affichée par install.sh)" }
+                if regs.claude_code {
+                    "enregistré"
+                } else {
+                    "non enregistré (commande affichée par install.sh)"
+                }
             );
             println!(
                 "{} ZCode : {}",
                 if regs.zcode { "✓" } else { "✗" },
-                if regs.zcode { "enregistré" } else { "non enregistré (~/.zcode/cli/config.json, mcp.servers)" }
+                if regs.zcode {
+                    "enregistré"
+                } else {
+                    "non enregistré (~/.zcode/cli/config.json, mcp.servers)"
+                }
             );
         }
         Err(e) => {
@@ -155,11 +192,7 @@ fn cmd_check() -> i32 {
 /// Équivalent minimal de `which` : parcours du PATH.
 fn which(bin: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| {
-                dir.join(bin).exists()
-            })
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).exists()))
         .unwrap_or(false)
 }
 
@@ -178,7 +211,10 @@ fn cmd_serve() -> i32 {
         }
     };
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("runtime tokio : {e}");
@@ -211,9 +247,9 @@ async fn serve(settings: Settings) -> anyhow::Result<()> {
         StreamableHttpServerConfig::default().with_json_response(true),
     );
 
-    let mcp = axum::Router::new()
-        .nest_service("/mcp", service)
-        .layer(axum::middleware::from_fn_with_state(token, auth::middleware));
+    let mcp = axum::Router::new().nest_service("/mcp", service).layer(
+        axum::middleware::from_fn_with_state(token, auth::middleware),
+    );
     let app = mcp.route("/health", axum::routing::get(|| async { "ok" }));
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;

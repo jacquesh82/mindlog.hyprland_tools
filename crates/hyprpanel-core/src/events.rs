@@ -25,7 +25,10 @@ pub struct EventLog {
 
 impl EventLog {
     pub fn new(cap: usize) -> Self {
-        Self { cap, entries: Mutex::new(VecDeque::with_capacity(cap)) }
+        Self {
+            cap,
+            entries: Mutex::new(VecDeque::with_capacity(cap)),
+        }
     }
 
     pub fn push(&self, event: String) {
@@ -34,12 +37,19 @@ impl EventLog {
             return;
         }
         // Garde-fou : un événement aberrant ne doit pas gonfler la mémoire.
-        let event = if event.len() > 2048 { event[..2048].to_string() } else { event };
+        let event = if event.len() > 2048 {
+            event[..2048].to_string()
+        } else {
+            event
+        };
         let mut guard = self.entries.lock().expect("EventLog empoisonné");
         if guard.len() == self.cap {
             guard.pop_front();
         }
-        guard.push_back(EventEntry { timestamp: timefmt::iso(std::time::SystemTime::now()), event });
+        guard.push_back(EventEntry {
+            timestamp: timefmt::iso(std::time::SystemTime::now()),
+            event,
+        });
     }
 
     /// Les `n` événements les plus récents, dans l'ordre chronologique.

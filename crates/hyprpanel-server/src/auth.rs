@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{header::AUTHORIZATION, StatusCode};
+use axum::http::{StatusCode, header::AUTHORIZATION};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -70,10 +70,14 @@ mod tests {
     fn cle_query_extraite() {
         let req = Request::builder()
             .uri("/mcp?key=abc123&autre=1")
-            .body(axum::body::Body::empty()).unwrap();
+            .body(axum::body::Body::empty())
+            .unwrap();
         assert_eq!(query_key(&req), Some("abc123"));
 
-        let req = Request::builder().uri("/mcp").body(axum::body::Body::empty()).unwrap();
+        let req = Request::builder()
+            .uri("/mcp")
+            .body(axum::body::Body::empty())
+            .unwrap();
         assert_eq!(query_key(&req), None);
     }
 }

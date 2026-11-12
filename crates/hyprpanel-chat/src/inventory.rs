@@ -927,6 +927,28 @@ impl Discovery {
     }
 }
 
+/// Répertoires de lanceurs `.desktop` parcourus (partagés avec `inventory_cache`).
+pub(crate) fn launcher_dirs(system_root: &Path) -> Vec<std::path::PathBuf> {
+    let mut dirs: Vec<_> = [
+        "usr/share/applications",
+        "usr/local/share/applications",
+        "var/lib/flatpak/exports/share/applications",
+        "var/lib/snapd/desktop/applications",
+    ]
+    .into_iter()
+    .map(|d| system_root.join(d))
+    .collect();
+    if system_root == Path::new("/") {
+        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
+        {
+            dirs.push(data_home.join("applications"));
+        }
+    }
+    dirs
+}
+
 #[cfg(test)]
 pub fn discover(
     fs: &FilesystemAccess,
@@ -1203,26 +1225,9 @@ pub fn discover_with_progress(
         count.min(MAX_ENTRIES),
         Some(count.min(MAX_ENTRIES)),
     );
-    let mut launcher_dirs: Vec<_> = [
-        "usr/share/applications",
-        "usr/local/share/applications",
-        "var/lib/flatpak/exports/share/applications",
-        "var/lib/snapd/desktop/applications",
-    ]
-    .into_iter()
-    .map(|d| system_root.join(d))
-    .collect();
-    if system_root == Path::new("/") {
-        if let Some(data_home) = std::env::var_os("XDG_DATA_HOME")
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".local/share")))
-        {
-            launcher_dirs.push(data_home.join("applications"));
-        }
-    }
     let mut launchers = 0;
     progress("launchers", 0, None);
-    for directory in launcher_dirs {
+    for directory in launcher_dirs(system_root) {
         let Ok(entries) = std::fs::read_dir(&directory) else {
             continue;
         };

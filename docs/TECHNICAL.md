@@ -43,6 +43,15 @@ hyprpanel-chat init
 
 ### Filesystem approval
 
+Decisions are remembered across launches in `~/.config/hyprpanel/consents.toml`
+(`src/consent.rs`, mode 600, in a directory protected from the file tools):
+`filesystem` (the access answer from the dialog, the terminal prompt or the
+`serve` `"fs"` confirmation, and the Settings grant/revoke button) and
+`inventory.<manager>` (each package-manager metadata query, answered once). A
+command-line `--fs`/`--no-fs` takes precedence for one launch and is not saved.
+The file is separate from `chat.toml` so the window's settings save never
+overwrites decisions written by the agent.
+
 Each application session starts without assistant filesystem permission. A
 native dialog asks whether to allow reading and editing files under the home
 folder (`~`). Credentials stay protected even after approval (`~/.ssh`,
@@ -114,6 +123,20 @@ Inventory commands use the same execution policy as chat commands, with a
 without running them. When confirmation is required, declining stops the
 remaining queries for that refresh; there is no silent shell fallback. Query
 output is parsed into selected metadata, never copied raw into model context.
+
+**Inventory cache** (`src/inventory_cache.rs`). The inventory is not redone on
+every start or filesystem approval. It stores an `inventory_fingerprint` in
+`environment.json`: a SHA-256 over the metadata only (mtime, size, symlink
+target — never content) of each package manager's installed database (pacman
+`local/`, dpkg `status`, rpm, apk, portage, flatpak `.changed`/`app`, snap
+`snaps/`, Nix profiles, Homebrew `opt`/`Caskroom`, xbps `pkgdb-*.plist`, pipx
+venv metadata, Cargo `.crates*.json`), the launcher directories, the detected
+managers, the approved configuration directory and the cache format. While the
+fingerprint is unchanged, the cached tools/sources/limits are reused (light
+facts such as kernel and session are still refreshed; `observed_at` keeps the
+inventory date) and no query or confirmation is triggered. Any package
+transaction invalidates it. **Refresh environment** always forces a full scan;
+configuration edits alone do not invalidate the cache.
 
 Each tool records the manager/package, package version and provenance, executable
 paths, observed application configs, launch references (`referenced_by`), declared

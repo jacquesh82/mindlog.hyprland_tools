@@ -15,7 +15,10 @@ pub fn iso(ts: SystemTime) -> String {
 }
 
 fn parts(ts: SystemTime) -> (i64, u32, u32, u32, u32, u32) {
-    let secs = ts.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let secs = ts
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil_from_days(days);

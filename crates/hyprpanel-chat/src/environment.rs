@@ -26,6 +26,24 @@ pub struct Environment {
     pub inventory_sources: Vec<crate::inventory::Source>,
     #[serde(default)]
     pub inventory_limits: Vec<String>,
+    /// Empreinte du référentiel au moment de l'inventaire (`inventory_cache`).
+    /// Absente : profil antérieur au cache, l'inventaire sera refait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inventory_fingerprint: Option<String>,
+}
+
+impl Environment {
+    /// Reprend l'inventaire d'un profil mémorisé : les faits légers (session,
+    /// noyau…) restent ceux de `prepare`, la date d'observation reste celle de
+    /// l'inventaire repris.
+    pub fn reuse_inventory(&mut self, cached: Environment) {
+        self.observed_at = cached.observed_at;
+        self.package_managers = cached.package_managers;
+        self.desktop_tools = cached.desktop_tools;
+        self.inventory_sources = cached.inventory_sources;
+        self.inventory_limits = cached.inventory_limits;
+        self.inventory_fingerprint = cached.inventory_fingerprint;
+    }
 }
 
 pub fn path() -> PathBuf {
@@ -150,6 +168,7 @@ pub fn prepare(path: &Path) -> anyhow::Result<Environment> {
         desktop_tools: Vec::new(),
         inventory_sources: Vec::new(),
         inventory_limits: Vec::new(),
+        inventory_fingerprint: None,
     };
     Ok(profile)
 }
@@ -172,7 +191,11 @@ pub fn save(path: &Path, profile: &Environment) -> anyhow::Result<()> {
 }
 
 pub fn load() -> Option<Environment> {
-    read_profile(&path()).and_then(|s| serde_json::from_str(&s).ok())
+    load_from(&path())
+}
+
+pub fn load_from(path: &Path) -> Option<Environment> {
+    read_profile(path).and_then(|s| serde_json::from_str(&s).ok())
 }
 
 fn read_profile(path: &Path) -> Option<String> {
@@ -194,6 +217,8 @@ pub fn context(approved: bool) -> String {
         p.desktop_tools.clear();
         let mut value = serde_json::to_value(&p).ok()?;
         value.as_object_mut()?.remove("desktop_tools");
+        // Détail interne du cache, sans intérêt pour le modèle.
+        value.as_object_mut()?.remove("inventory_fingerprint");
         value["desktop_tool_names"] = serde_json::json!(names);
         serde_json::to_string(&value).ok()
     }) {
@@ -233,6 +258,23 @@ mod tests {
             );
         }
         assert!(!context(false).contains("LOCAL ENVIRONMENT"));
+    }
+    #[test]
+    fn reused_inventory_keeps_tools_and_observation_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("environment.json");
+        let mut cached = prepare(&path).unwrap();
+        cached.observed_at = "inventory-time".into();
+        cached.package_managers = vec!["pacman".into(), "portage".into()];
+        cached.inventory_limits = vec!["limit".into()];
+        cached.inventory_fingerprint = Some("abc".into());
+        save(&path, &cached).unwrap();
+        let mut fresh = prepare(&path).unwrap();
+        fresh.reuse_inventory(load_from(&path).unwrap());
+        assert_eq!(fresh.observed_at, "inventory-time");
+        assert_eq!(fresh.package_managers, ["pacman", "portage"]);
+        assert_eq!(fresh.inventory_limits, ["limit"]);
+        assert_eq!(fresh.inventory_fingerprint.as_deref(), Some("abc"));
     }
     #[test]
     fn legacy_static_tool_list_keeps_first_seen_when_migrating() {
