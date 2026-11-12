@@ -164,6 +164,12 @@ impl Approvals {
             app.set_command_return_overlay(app.get_overlay());
             app.set_command_text(details.into());
             app.set_command_reason(reason.into());
+            // Auto-Accept : jamais pour une commande dangereuse.
+            app.set_command_countdown(if high {
+                0
+            } else {
+                app.get_auto_accept_seconds().max(0)
+            });
             app.set_activity("approval".into());
             app.set_status(app.get_tr().command_waiting);
             app.set_overlay("command".into());

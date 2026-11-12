@@ -85,6 +85,13 @@ pub struct ChatConfig {
     pub language: String,
     #[serde(default = "default_animate_avatar")]
     pub animate_avatar: bool,
+    /// Auto-Accept : le bouton d'exécution d'une demande de confirmation
+    /// décompte puis accepte seul. Jamais pour une commande dangereuse.
+    #[serde(default = "default_auto_accept")]
+    pub auto_accept: bool,
+    /// Durée du décompte, bornée à `AUTO_ACCEPT_RANGE`.
+    #[serde(default = "default_auto_accept_seconds")]
+    pub auto_accept_seconds: u32,
     /// Optionnel ; sinon composé depuis la config du daemon (port + jeton).
     pub mcp_url: Option<String>,
     /// Fournisseur lu dans `chat.toml` quand `--provider` l'a remplacé pour
@@ -157,6 +164,29 @@ fn default_memory_enabled() -> bool {
     true
 }
 
+/// Bornes du décompte Auto-Accept, en secondes.
+pub const AUTO_ACCEPT_RANGE: std::ops::RangeInclusive<u32> = 1..=60;
+
+fn default_auto_accept() -> bool {
+    true
+}
+
+fn default_auto_accept_seconds() -> u32 {
+    5
+}
+
+impl ChatConfig {
+    /// Durée effective du décompte : 0 = désactivé.
+    pub fn auto_accept_delay(&self) -> u32 {
+        if self.auto_accept {
+            self.auto_accept_seconds
+                .clamp(*AUTO_ACCEPT_RANGE.start(), *AUTO_ACCEPT_RANGE.end())
+        } else {
+            0
+        }
+    }
+}
+
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "/root".into()))
 }
@@ -195,6 +225,8 @@ impl ChatConfig {
             max_tokens: 8192,
             language: "fr".into(),
             animate_avatar: true,
+            auto_accept: default_auto_accept(),
+            auto_accept_seconds: default_auto_accept_seconds(),
             mcp_url: None,
             persisted_provider: None,
         }
@@ -457,6 +489,29 @@ mod tests {
                 .unwrap()
                 .memory_enabled
         );
+    }
+
+    #[test]
+    fn auto_accept_active_par_defaut_et_borne() {
+        let mut cfg = ChatConfig::defaults();
+        assert_eq!(cfg.auto_accept_delay(), 5);
+        // Ancien chat.toml sans la clé : activé, 5 s.
+        let old = cfg
+            .as_toml()
+            .lines()
+            .filter(|line| !line.starts_with("auto_accept"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let migrated = toml::from_str::<ChatConfig>(&old).unwrap();
+        assert!(migrated.auto_accept);
+        assert_eq!(migrated.auto_accept_seconds, 5);
+        cfg.auto_accept_seconds = 600;
+        assert_eq!(cfg.auto_accept_delay(), 60);
+        cfg.auto_accept_seconds = 0;
+        assert_eq!(cfg.auto_accept_delay(), 1);
+        cfg.auto_accept = false;
+        let reloaded = toml::from_str::<ChatConfig>(&cfg.as_toml()).unwrap();
+        assert_eq!(reloaded.auto_accept_delay(), 0);
     }
 
     #[test]

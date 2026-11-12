@@ -230,7 +230,7 @@ gateway enforces network limits and command approval independently of the model.
 ### Settings tabs and execution policy
 
 Settings uses native Slint tabs with independently scrollable pages: General
-(language, avatar), Access (filesystem consent, execution policy), Assistant
+(language, avatar, Auto-Accept), Access (filesystem consent, execution policy), Assistant
 (subscription/model, SYSTEM context, client status), and Memory (conversation
 recall, clearing, environment profile). The footer stays visible. Unsaved values
 remain available when switching tabs; Save applies all pages together. The
@@ -248,6 +248,13 @@ gateways for all three providers.
 | `full_access` | No confirmation, including sudo | No confirmation | Same filesystem consent |
 | `sudo_only` | Confirm detected elevation/indirect execution | No confirmation | Same filesystem consent |
 | `copy_only` | Return `manual_only`, never spawn | Blocked, including automatic backups | Blocked at the gateway |
+
+**Auto-Accept** (`auto_accept`, default `true`; `auto_accept_seconds`, default 5,
+bounded 1–60). In the window, the confirmation dialog's Run button counts down
+(`Run (5)` … `Run (1)`) and accepts the request at 0; Decline stays available
+throughout. Dangerous commands (`Confirmation::Always`, confirmed every time) never
+count down. Filesystem consent is not affected. The terminal (`cli`) and `serve`
+fronts keep their explicit answers.
 
 Copy-only still allows approved file reads, native metadata inventory, web research,
 and LYRA's own preference/profile/memory storage. The command tool remains available

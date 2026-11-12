@@ -205,7 +205,7 @@ A one-shot turn exits with code 1 if an error was displayed.
 
 ## Settings and backups
 
-- **⚙ Settings**: tabs for General, Access, Assistant, and Memory. Choose language, execution policy, model, SYSTEM context, and local memory preferences.
+- **⚙ Settings**: tabs for General, Access, Assistant, and Memory. Choose language, Auto-Accept (Run button counts down, then accepts; on by default, 5 s, never for dangerous commands), execution policy, model, SYSTEM context, and local memory preferences.
 - **SYSTEM context**: add your own instructions for all providers. They complement LYRA’s role; its identity, execution environment and application rules always remain.
 - **Local conversation memory**: disable recall and recording, or clear saved excerpts and start a new chat.
 - **⟲ History**: browse saved configurations and restore a backup.

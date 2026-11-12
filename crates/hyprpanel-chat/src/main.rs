@@ -167,6 +167,7 @@ fn main() -> anyhow::Result<()> {
     app.set_provider_index(cfg.provider.index());
     app.set_model_label(cfg.model_label().into());
     app.set_animations_enabled(cfg.animate_avatar);
+    app.set_auto_accept_seconds(cfg.auto_accept_delay() as i32);
     app.set_cfg_memory_enabled(cfg.memory_enabled);
     app.set_cfg_operation_mode(cfg.operation_mode.index());
     app.set_operations_allowed(cfg.operation_mode.can_operate());
@@ -221,6 +222,7 @@ fn main() -> anyhow::Result<()> {
         app.on_command_decision(move |id, approved| {
             if let Some(app) = weak.upgrade() {
                 if app.get_overlay() == "command" && app.get_command_id() == id {
+                    app.set_command_countdown(0);
                     app.set_overlay(app.get_command_return_overlay());
                     app.set_command_return_overlay("none".into());
                     app.set_command_text("".into());
@@ -429,6 +431,11 @@ fn main() -> anyhow::Result<()> {
                 app.set_cfg_max_tokens(cfg.max_tokens.to_string().into());
                 app.set_cfg_api_key(cfg.api_key.clone().into());
                 app.set_cfg_animate_avatar(cfg.animate_avatar);
+                app.set_cfg_auto_accept(cfg.auto_accept);
+                app.set_cfg_auto_accept_seconds(cfg.auto_accept_seconds.clamp(
+                    *chat_config::AUTO_ACCEPT_RANGE.start(),
+                    *chat_config::AUTO_ACCEPT_RANGE.end(),
+                ) as i32);
                 app.set_cfg_memory_enabled(cfg.memory_enabled);
                 app.set_cfg_operation_mode(cfg.operation_mode.index());
                 app.set_cfg_system_context(cfg.system_context.clone().into());
@@ -450,6 +457,13 @@ fn main() -> anyhow::Result<()> {
                 "fr".into()
             };
             cfg.animate_avatar = app.get_cfg_animate_avatar();
+            cfg.auto_accept = app.get_cfg_auto_accept();
+            if cfg.auto_accept {
+                cfg.auto_accept_seconds = (app.get_cfg_auto_accept_seconds().max(0) as u32).clamp(
+                    *chat_config::AUTO_ACCEPT_RANGE.start(),
+                    *chat_config::AUTO_ACCEPT_RANGE.end(),
+                );
+            }
             cfg.memory_enabled = app.get_cfg_memory_enabled();
             let Some(mode) = operations::Mode::from_index(app.get_cfg_operation_mode()) else {
                 return;
@@ -489,6 +503,7 @@ fn main() -> anyhow::Result<()> {
                     *cfg_for_settings.lock().expect("cfg empoisonnée") = cfg.clone();
                     app.set_model_label(cfg.model_label().into());
                     app.set_animations_enabled(cfg.animate_avatar);
+                    app.set_auto_accept_seconds(cfg.auto_accept_delay() as i32);
                     let _ = tx_cfg.send(agent::UserEvent::ConfigUpdated(Box::new(cfg)));
                     app.set_overlay("none".into());
                     app.invoke_focus_composer();
