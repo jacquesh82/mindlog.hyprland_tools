@@ -517,9 +517,17 @@ impl Panel {
 /// Instructions transmises aux clients MCP (Claude Code, ZCode…) au handshake.
 /// (Littéral requis par le macro `tool_handler`.)
 // (version.workspace = 0.1.0 — le macro n'accepte que des littéraux)
+impl Panel {
+    /// Outils Hyprland (ce fichier) et outils hyprdesk (`crate::hyprdesk`).
+    fn all_tools() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
+        Self::tool_router() + Self::hyprdesk_router()
+    }
+}
+
 #[tool_handler(
+    router = Self::all_tools(),
     name = "hyprpanel",
     version = "0.1.0",
-    instructions = "Panneau de configuration Hyprland (configuration Lua, API hl.*).\n\nWORKFLOW RECOMMANDÉ\n1. hypr_status puis hypr_config_files pour situer la configuration.\n2. Tester un réglage À CHAUD avec hypr_set_option_live (aperçu non persistant) et confirmer visuellement (hypr_screenshot, hypr_recent_events).\n3. Pour persister : éditer ~/.config/hypr/hyprland.lua avec tes outils fichiers natifs (hypr_find_setting localise la ligne), puis hypr_reload et vérifier hypr_config_errors.\n4. hypr_backup avant une série d'éditions ; hypr_restore_backup + hypr_reload pour annuler.\n\nRÈGLES\n- monitors.lua et inputs.lua sont générés par un outil externe : NE JAMAIS les éditer.\n- getoption/hl.get_config lisent l'état des fichiers : un réglage appliqué à chaud peut y afficher l'ancienne valeur alors qu'il est actif.\n- hypr_set_option_live répond ok même pour une option inconnue : toujours vérifier l'effet réel.\n- Prévenir l'utilisateur avec hypr_notify avant un changement visible important."
+    instructions = "Panneau de configuration Hyprland (configuration Lua, API hl.*).\n\nWORKFLOW RECOMMANDÉ\n1. hypr_status puis hypr_config_files pour situer la configuration.\n2. Tester un réglage À CHAUD avec hypr_set_option_live (aperçu non persistant) et confirmer visuellement (hypr_screenshot, hypr_recent_events).\n3. Pour persister : éditer ~/.config/hypr/hyprland.lua avec tes outils fichiers natifs (hypr_find_setting localise la ligne), puis hypr_reload et vérifier hypr_config_errors.\n4. hypr_backup avant une série d'éditions ; hypr_restore_backup + hypr_reload pour annuler.\n\nRÈGLES\n- monitors.lua et inputs.lua sont générés par un outil externe : NE JAMAIS les éditer.\n- getoption/hl.get_config lisent l'état des fichiers : un réglage appliqué à chaud peut y afficher l'ancienne valeur alors qu'il est actif.\n- hypr_set_option_live répond ok même pour une option inconnue : toujours vérifier l'effet réel.\n- Prévenir l'utilisateur avec hypr_notify avant un changement visible important.\n\nHYPRDESK (bureau pour Hyprland, outils hyprdesk_*)\n- hyprdesk_status d'abord ; ses réglages passent par hyprdesk_config_list / _get / _set / _unset (même effet que ses Réglages, appliqués aussitôt), jamais par l'édition de settings.lua.\n- autostart.lua, inputs.lua et monitors.lua sont tenus par hyprdesk : passer par hyprdesk_autostart, hyprdesk_keyboard et ses Réglages.\n- Ménage de hyprland.lua : hyprdesk_hyprland_check, puis hyprdesk_hyprland_fix après accord de l'utilisateur.\n- hyprdesk_config_reset et hyprdesk_hyprland_fix modifient des fichiers : toujours demander avant."
 )]
 impl ServerHandler for Panel {}

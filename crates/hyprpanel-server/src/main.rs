@@ -5,6 +5,7 @@
 //! `check` (diagnostic), `token` (affiche le jeton).
 
 mod auth;
+mod hyprdesk;
 mod state;
 mod tools;
 
